@@ -471,12 +471,25 @@ export async function details({ product }) {
   return parseDetails(basePage, page2);
 }
 
-export async function reviews({ product, sku, limit = 10, sort = "helpful", hasPhotos = false } = {}) {
+export async function reviews({
+  product,
+  sku,
+  limit = 10,
+  sort = "helpful",
+  hasPhotos = false,
+  variantOnly = true,
+} = {}) {
   const id = product || sku;
   const path = productPath(id);
-  // Fetch a wider window then sort/filter client-side (composer ignores most sort query params).
-  const page = await fetchJson(`${path}reviews/`);
-  return parseReviews(page, limit, { sort, hasPhotos, productSku: productSku(id) });
+  // reviewsVariantMode=1 → Ozon UI «Этот вариант»; =2 → all sibling variants on the card.
+  const mode = variantOnly ? 1 : 2;
+  const page = await fetchJson(`${path}reviews/?reviewsVariantMode=${mode}`);
+  return parseReviews(page, limit, {
+    sort,
+    hasPhotos,
+    productSku: productSku(id),
+    variantOnly: Boolean(variantOnly),
+  });
 }
 
 export async function questions({ product, limit = 10 }) {

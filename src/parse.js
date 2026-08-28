@@ -683,7 +683,11 @@ const PACKAGING_RE =
 const PRODUCT_RE =
   /экран|диспле|процесс|видеокарт|rtx|gtx|батаре|автоном|клавиатур|производительн|тормоз|греетс|шум|ssd|оператив|озу|вес|герцовк|гц|fps|игр[аыуе]/i;
 
-export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = false, productSku = null } = {}) {
+export function parseReviews(
+  page,
+  limit = 10,
+  { sort = "default", hasPhotos = false, productSku = null, variantOnly = false } = {}
+) {
   const w = widget(page, "webListReviews");
   const raw = w?.reviews || w?.items || [];
   const { rating, reviews: total } = parseProductScore(page);
@@ -692,6 +696,22 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
     skuFromUrl(page?.seo?.link?.[0]?.href) ||
     String(w?.sku || w?.itemId || "") ||
     null;
+  const products = w?.products || {};
+  const siblingSkus = Object.keys(products);
+
+  const variantLabel = (sku) => {
+    const p = products[sku];
+    if (!p?.variants?.length) return null;
+    const parts = p.variants
+      .map((v) => {
+        const name = v.name || v.aspectName || "";
+        const value = v.value || v.aspectValue || "";
+        if (name && value) return `${name}: ${value}`;
+        return value || name || null;
+      })
+      .filter(Boolean);
+    return parts.length ? parts : null;
+  };
 
   let reviews = raw.map((r) => {
     const c = r.content || {};
@@ -709,13 +729,18 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
     const matchedSku =
       String(r.itemId || r.sku || r.productId || r.contextItemId || c.itemId || "") || null;
     const isCrossListing = Boolean(matchedSku && pageSku && matchedSku !== String(pageSku));
-    const reviewsScope = isCrossListing
-      ? "crossListing"
-      : likelySellerGeneric
-        ? "seller"
-        : aboutProduct
-          ? "product"
-          : "unclear";
+    const isOtherVariant = Boolean(
+      matchedSku && pageSku && matchedSku !== String(pageSku) && products[matchedSku]
+    );
+    const reviewsScope = isOtherVariant
+      ? "otherVariant"
+      : isCrossListing
+        ? "crossListing"
+        : likelySellerGeneric
+          ? "seller"
+          : aboutProduct
+            ? "product"
+            : "unclear";
     return {
       author: author || null,
       score: typeof c.score === "number" ? c.score : null,
@@ -730,6 +755,8 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
       likelySellerGeneric,
       matchedSku,
       isCrossListing,
+      isOtherVariant,
+      variant: variantLabel(matchedSku),
       reviewsScope,
     };
   });
@@ -752,9 +779,22 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
   const sellerish = reviews.filter((r) => r.likelySellerGeneric || r.reviewsScope === "seller").length;
   const about = reviews.filter((r) => r.aboutProduct && !r.likelySellerGeneric).length;
   const cross = reviews.filter((r) => r.isCrossListing).length;
+  const otherVariant = reviews.filter((r) => r.isOtherVariant).length;
   const reviewsLikelySellerPooled =
     reviews.length >= 3 && sellerish >= Math.ceil(reviews.length * 0.5);
   const notes = [];
+  if (variantOnly && reviews.length === 0) {
+    notes.push(
+      "No reviews for this exact SKU (variantOnly=true / Ozon «Этот вариант»). " +
+        "Card may still show pooled counts — retry with variantOnly=false for all sibling variants."
+    );
+  }
+  if (!variantOnly && otherVariant > 0) {
+    notes.push(
+      `${otherVariant} review(s) are from other color/config SKUs (reviewsScope=otherVariant). ` +
+        "Use variantOnly=true to match the on-site «Этот вариант» filter."
+    );
+  }
   if (reviews.length && reviews.filter((r) => r.purchased).length === 0) {
     notes.push(
       "No reviews marked purchased=true on this page — common for CN/parallel-import sellers; prefer aboutProduct=true + useful votes."
@@ -765,7 +805,7 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
       "Many reviews look seller/packaging-generic (reviewsScope=seller) — do not quote as product experience; filter aboutProduct=true."
     );
   }
-  if (cross > 0) {
+  if (cross > 0 && otherVariant === 0) {
     notes.push(`${cross} review(s) matched a different SKU (isCrossListing) — may be pooled across seller listings.`);
   }
 
@@ -773,10 +813,14 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
     rating,
     totalReviews: total,
     productSku: pageSku,
+    variantOnly: Boolean(variantOnly),
+    variantMode: variantOnly ? "this" : "all",
+    siblingVariantCount: siblingSkus.length,
     count: reviews.length,
     sort,
     aboutProductCount: about,
     sellerGenericCount: sellerish,
+    otherVariantCount: otherVariant,
     crossListingCount: cross,
     sellerGenericShare: reviews.length ? Math.round((sellerish / reviews.length) * 100) / 100 : 0,
     reviewsLikelySellerPooled,

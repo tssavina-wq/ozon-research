@@ -126,7 +126,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.1" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.2" });
 
 server.registerTool(
   "ozon_search",
@@ -207,18 +207,26 @@ server.registerTool(
   {
     title: "Get Ozon product reviews",
     description:
-      "Buyer reviews. sort=helpful|date|product (aboutProduct first)|default. " +
-      "hasPhotos=true keeps only reviews with photos. Each review has aboutProduct, likelySellerGeneric, " +
-      "reviewsScope (product|seller|crossListing|unclear), matchedSku, isCrossListing. " +
-      "Aggregate: reviewsLikelySellerPooled / sellerGenericShare — when true, do NOT quote as product feedback. " +
-      "Accepts product or sku.",
+      "Buyer reviews for a product SKU. Default variantOnly=true matches Ozon UI «Этот вариант» " +
+      "(only reviews left on this exact color/config SKU — may be empty while the card shows pooled totals). " +
+      "Pass variantOnly=false for all sibling variants on the same card. " +
+      "sort=helpful|date|product|default. hasPhotos=true keeps photo reviews. " +
+      "Each review: aboutProduct, likelySellerGeneric, matchedSku, isOtherVariant, variant[] labels, " +
+      "reviewsScope (product|otherVariant|seller|crossListing|unclear). " +
+      "If count=0 with variantOnly, retry variantOnly=false and label quotes as other-variant.",
     inputSchema: {
       product: productId.optional(),
       sku: z.string().min(1).optional().describe("Alias for product"),
+      variantOnly: z
+        .boolean()
+        .optional()
+        .describe(
+          "true (default): only this SKU («Этот вариант»). false: all color/config variants on the card"
+        ),
       sort: z
         .enum(["helpful", "date", "product", "default"])
         .optional()
-        .describe("Client-side sort (Ozon composer ignores URL sort)"),
+        .describe("Client-side sort (Ozon composer ignores most URL sort params)"),
       hasPhotos: z.boolean().optional().describe("Only reviews with photos"),
       limit: limitSchema(30, 10).describe("Number of reviews to return"),
     },

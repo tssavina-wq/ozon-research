@@ -6,6 +6,7 @@ import {
   annotateReviewTrust,
   extractHardwareHints,
   parseSpecs,
+  parseReviews,
   _internal,
 } from "../src/parse.js";
 import { inferCategoryFromQuery } from "../src/ozon.js";
@@ -165,5 +166,70 @@ ok(!specs.sparse, "rich specs not sparse");
 ok(inferCategoryFromQuery("ультрабук dual screen") === "noutbuki-15692", "ultrabook → laptops");
 ok(inferCategoryFromQuery("игровой ноутбук RTX") === "igrovye-noutbuki-15821", "gaming laptop category");
 ok(inferCategoryFromQuery("iphone 15") == null, "phone query no laptop pin");
+
+const reviewsPage = {
+  widgetStates: {
+    "webSingleProductScore-1": JSON.stringify({ text: "5 • 10 отзывов" }),
+    "webListReviews-1": JSON.stringify({
+      itemId: "111",
+      products: {
+        111: {
+          itemId: "111",
+          variants: [
+            { name: "Цвет товара", value: "серый" },
+            { name: "Оперативная память", value: "32 ГБ" },
+          ],
+        },
+        222: {
+          itemId: "222",
+          variants: [{ name: "Цвет товара", value: "белый" }],
+        },
+      },
+      reviews: [
+        {
+          itemId: "111",
+          publishedAt: 1700000000,
+          content: { comment: "Экран отличный, батарея держит", score: 5 },
+          usefulness: { useful: 3 },
+          isItemPurchased: true,
+        },
+        {
+          itemId: "222",
+          publishedAt: 1700000001,
+          content: { comment: "Упаковка супер, продавец молодец", score: 5 },
+          usefulness: { useful: 1 },
+          isItemPurchased: true,
+        },
+      ],
+    }),
+  },
+};
+
+const allVariants = parseReviews(reviewsPage, 10, {
+  productSku: "111",
+  variantOnly: false,
+  sort: "default",
+});
+ok(allVariants.count === 2, "all-variant reviews count 2");
+ok(allVariants.reviews[1].isOtherVariant === true, "sibling SKU marked otherVariant");
+ok(allVariants.reviews[1].reviewsScope === "otherVariant", "scope otherVariant");
+ok(
+  Array.isArray(allVariants.reviews[0].variant) &&
+    allVariants.reviews[0].variant.some((x) => /серый/i.test(x)),
+  "variant labels attached"
+);
+
+const emptyThis = parseReviews(
+  {
+    widgetStates: {
+      "webSingleProductScore-1": JSON.stringify({ text: "5 • 10 отзывов" }),
+      "webListReviews-1": JSON.stringify({ itemId: "999", products: {}, reviews: [] }),
+    },
+  },
+  10,
+  { productSku: "999", variantOnly: true }
+);
+ok(emptyThis.count === 0, "empty this-variant");
+ok(/variantOnly=true|Этот вариант/i.test(emptyThis.note || ""), "empty note suggests pooled fallback");
 
 process.exit(failed ? 1 : 0);
