@@ -24,12 +24,13 @@ import {
   searchCitiesTool,
   setLocation,
 } from "./ozon.js";
-import { shutdown } from "./browser.js";
+import { shutdown, warmup } from "./browser.js";
 
 const log = (...a) => console.error("[ozon-customer-mcp]", ...a);
 const TOOL_TIMEOUT_MS = 55000;
 const MAX_TEXT = 60000;
-const EXIT_IDLE_MS = Number(process.env.OZON_EXIT_IDLE_MS || 10 * 60 * 1000);
+const EXIT_IDLE_MS = Number(process.env.OZON_EXIT_IDLE_MS || 30 * 60 * 1000);
+const DO_WARMUP = process.env.OZON_WARMUP !== "0";
 
 const productId = z
   .string()
@@ -125,7 +126,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.1" });
 
 server.registerTool(
   "ozon_search",
@@ -136,6 +137,7 @@ server.registerTool(
       "by name or keywords. Returns sku, name, price, rating, reviews, brand, url, plus reviewTrust, " +
       "baseModelKey, configs[] / variants[]. Same review count on color/RAM variants of one card is normal " +
       "(variantReviewPool); reviewsSharedAcrossModels only flags collisions across different models. " +
+      "Laptop/ultrabook queries auto-pin category noutbuki-15692 when category omitted (categoryInferred). " +
       "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. " +
       "Color+RAM/SSD configs are deduped by default. If sort=popular is empty/ads-only → auto rating " +
       "(see note — not true popularity). page=2+ for next shelf. " +
@@ -206,8 +208,9 @@ server.registerTool(
     title: "Get Ozon product reviews",
     description:
       "Buyer reviews. sort=helpful|date|product (aboutProduct first)|default. " +
-      "hasPhotos=true keeps only reviews with photos. Each review has aboutProduct " +
-      "(heuristic: product experience vs packaging/seller gifts). " +
+      "hasPhotos=true keeps only reviews with photos. Each review has aboutProduct, likelySellerGeneric, " +
+      "reviewsScope (product|seller|crossListing|unclear), matchedSku, isCrossListing. " +
+      "Aggregate: reviewsLikelySellerPooled / sellerGenericShare — when true, do NOT quote as product feedback. " +
       "Accepts product or sku.",
     inputSchema: {
       product: productId.optional(),
@@ -303,8 +306,8 @@ server.registerTool(
     title: "Get Ozon seller profile",
     description:
       "Shop profile for a seller. Use when user asks 'is this seller trustworthy?' or before buying from unknown shop. " +
-      "Returns: shop name, logo, badges (Premium etc.), info modal link. " +
-      "Seller id examples: slug 'dubaidutyfree', numeric id, or seller URL from product card.",
+      "Returns: shop name, logo, subtitle, rating (when present), badges with human labels (not only modal URLs), " +
+      "infoUrl, isExpress/isOfficial hints. Product-card seller.rating is often richer than this page.",
     inputSchema: {
       seller: catalogId('Seller slug "dubaidutyfree", numeric id, or https://www.ozon.ru/seller/... URL'),
     },
@@ -404,8 +407,9 @@ server.registerTool(
   {
     title: "Compare Ozon products side-by-side",
     description:
-      "Fetch details+specs for 2–8 products and build a characteristic matrix. " +
-      "Also returns extracted{} hardware hints from title when specs are sparse. " +
+      "Fetch details+fullest specs widget for 2–8 products and build a characteristic matrix " +
+      "(same parser as ozon_product_specs; retries if sparse). " +
+      "extracted{} GPU/RAM hints come from characteristics or title only — never from description. " +
       "missingKeysByProduct[sku] = fields present in the matrix but missing on that SKU.",
     inputSchema: {
       products: z
@@ -527,3 +531,11 @@ transport.onclose = cleanup;
 await server.connect(transport);
 resetExitIdle();
 log("ready on stdio");
+
+// Background browser warmup so first tool isn't blocked on Camoufox cold start.
+// Does not block MCP discovery (tools/list already registered above).
+if (DO_WARMUP) {
+  warmup()
+    .then(() => log("browser warmup ok"))
+    .catch((err) => log("browser warmup failed:", err?.message || err));
+}

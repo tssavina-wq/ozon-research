@@ -98,6 +98,11 @@ export async function fetchJson(path, { retries = 2 } = {}) {
   }
 }
 
+export async function warmup() {
+  ensureProcess();
+  return call("warmup");
+}
+
 export async function getLocation() {
   return call("get_location");
 }

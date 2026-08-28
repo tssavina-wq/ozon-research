@@ -330,6 +330,9 @@ async def handle_commands() -> None:
             if cmd == "fetch":
                 data = await browser.fetch_json(req["path"], retries=int(req.get("retries", 1)))
                 respond({"id": req_id, "ok": True, "data": data})
+            elif cmd == "warmup":
+                await browser.start()
+                respond({"id": req_id, "ok": True, "data": {"ready": True}})
             elif cmd == "get_location":
                 data = await browser.get_location()
                 respond({"id": req_id, "ok": True, "data": data})

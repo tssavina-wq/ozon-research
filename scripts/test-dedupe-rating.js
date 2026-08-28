@@ -4,8 +4,11 @@ import {
   modelKey,
   baseModelKey,
   annotateReviewTrust,
+  extractHardwareHints,
+  parseSpecs,
   _internal,
 } from "../src/parse.js";
+import { inferCategoryFromQuery } from "../src/ozon.js";
 
 const { parseProductScore } = _internal;
 let failed = 0;
@@ -81,22 +84,21 @@ const configs = [
   },
   {
     sku: "11",
-    name: "MSI Crosshair 16 32GB 1024GB",
+    name: "MSI Crosshair 16 32GB 1TB",
     brand: "MSI",
     price: 120000,
     rating: 4.8,
     reviews: 100,
   },
   {
-    sku: "12",
+    sku: "20",
     name: "Logitech G305",
-    brand: "Logitech G",
-    price: 2000,
+    brand: "Logitech",
+    price: 4000,
     rating: 4.9,
-    reviews: 15000,
+    reviews: 500,
   },
 ];
-ok(baseModelKey(configs[0]) === baseModelKey(configs[1]), "RAM/SSD configs share baseModelKey");
 
 const deduped = dedupeSearchItems([...cd26, configs[2]], { colors: true, configs: true });
 ok(deduped.length === 2, "dedupe colors+other model → 2");
@@ -107,5 +109,61 @@ const cfgDeduped = dedupeSearchItems(configs, { colors: true, configs: true });
 ok(cfgDeduped.length === 2, "config dedupe → Crosshair + G305");
 const crosshair = cfgDeduped.find((x) => /crosshair/i.test(x.baseModelKey || ""));
 ok((crosshair?.configCount || 0) >= 2, "Crosshair has configs[]");
+
+// extracted GPU: never invent RTX from description when title has iGPU
+const gpd = extractHardwareHints(
+  "GPD WIN MAX 2 2024 Ryzen 7 8840U Radeon 780M 32GB 1TB",
+  "Сравнение с RTX 3070 ноутбуками — наш Radeon 780M почти как RTX",
+  {}
+);
+ok(/780m/i.test(gpd.gpu?.value || ""), "GPD GPU from title is 780M");
+ok(!/rtx\s*3070/i.test(gpd.gpu?.value || ""), "GPD GPU not false RTX from description");
+
+const charGpu = extractHardwareHints("Some laptop", "RTX 4090 everywhere", {
+  Видеокарта: "Intel Arc Graphics",
+});
+ok(charGpu.gpu?.value === "Intel Arc Graphics", "characteristics GPU wins");
+ok(charGpu.gpu?.source === "characteristics", "GPU source=characteristics");
+
+// parseSpecs picks richest webCharacteristics widget
+const sparseW = {
+  totalCount: 5,
+  characteristics: [
+    {
+      short: [
+        { name: "A", values: [{ text: "1" }] },
+        { name: "B", values: [{ text: "2" }] },
+      ],
+    },
+  ],
+};
+const richW = {
+  totalCount: 50,
+  characteristics: [
+    {
+      short: Array.from({ length: 20 }, (_, i) => ({
+        name: `S${i}`,
+        values: [{ text: String(i) }],
+      })),
+      long: Array.from({ length: 30 }, (_, i) => ({
+        name: `L${i}`,
+        values: [{ text: String(i) }],
+      })),
+    },
+  ],
+};
+const specsPage = {
+  widgetStates: {
+    "webCharacteristics-1-default-1": JSON.stringify(sparseW),
+    "webCharacteristics-2-default-1": JSON.stringify(richW),
+  },
+};
+const specs = parseSpecs(specsPage);
+ok(specs.fieldCount >= 40, `parseSpecs picks rich widget (${specs.fieldCount})`);
+ok(!specs.sparse, "rich specs not sparse");
+
+ok(inferCategoryFromQuery("ультрабук dual screen") === "noutbuki-15692", "ultrabook → laptops");
+ok(inferCategoryFromQuery("игровой ноутбук RTX") === "igrovye-noutbuki-15821", "gaming laptop category");
+ok(inferCategoryFromQuery("iphone 15") == null, "phone query no laptop pin");
 
 process.exit(failed ? 1 : 0);

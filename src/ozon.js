@@ -31,6 +31,25 @@ import { _internal } from "./parse.js";
 
 const { skuFromUrl } = _internal;
 
+/** Soft intent → category pin when agent didn't pass category. */
+const QUERY_CATEGORY_HINTS = [
+  { re: /игров\S*\s+ноутбук|gaming\s+laptop/i, category: "igrovye-noutbuki-15821" },
+  {
+    re: /ультрабук|ultrabook|ноутбук|laptop|notebook|zenbook|macbook|thinkpad|yoga\s*book|thinkbook/i,
+    category: "noutbuki-15692",
+  },
+  { re: /беспроводн\S*\s+мыш|wireless\s+mouse/i, category: "besprovodnye-myshi-31940" },
+];
+
+export function inferCategoryFromQuery(query) {
+  const q = String(query || "").trim();
+  if (!q) return null;
+  for (const h of QUERY_CATEGORY_HINTS) {
+    if (h.re.test(q)) return h.category;
+  }
+  return null;
+}
+
 const SORT_MAP = {
   // IMPORTANT: Ozon `sorting=popular` returns an EMPTY tile grid for many queries.
   // Default popularity is "no sorting param".
@@ -356,10 +375,12 @@ export async function search({
   }
   const q = query ? String(query).trim() : undefined;
   const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+  const inferredCategory = !category && q ? inferCategoryFromQuery(q) : null;
+  const categoryUsed = category || inferredCategory || undefined;
 
   const built = await buildCatalogUrl({
     query: q,
-    category,
+    category: categoryUsed,
     sort,
     priceMin,
     priceMax,
@@ -406,6 +427,7 @@ export async function search({
   const out = {
     query: q || null,
     category: built.category,
+    categoryInferred: Boolean(inferredCategory && !category),
     sort: sortUsed,
     page: page || 1,
     filters:
@@ -454,7 +476,7 @@ export async function reviews({ product, sku, limit = 10, sort = "helpful", hasP
   const path = productPath(id);
   // Fetch a wider window then sort/filter client-side (composer ignores most sort query params).
   const page = await fetchJson(`${path}reviews/`);
-  return parseReviews(page, limit, { sort, hasPhotos });
+  return parseReviews(page, limit, { sort, hasPhotos, productSku: productSku(id) });
 }
 
 export async function questions({ product, limit = 10 }) {
@@ -589,7 +611,7 @@ export async function relatedProducts({ product, limit = 12 }) {
   return { product: productSku(product), ...parseRelatedProducts(page, limit) };
 }
 
-/** Compare 2–8 products: details + specs in one response with a characteristic matrix. */
+/** Compare 2–8 products: details + fullest specs widget in one matrix. */
 export async function compareProducts({ products }) {
   const list = [
     ...new Set((products || []).map((p) => String(p || "").trim()).filter(Boolean)),
@@ -597,46 +619,55 @@ export async function compareProducts({ products }) {
   if (list.length < 2) throw new Error("products requires at least 2 items (sku, url, or slug)");
   if (list.length > 8) throw new Error("products supports at most 8 items");
 
-  const rows = [];
-  for (const product of list) {
+  async function loadOne(product) {
     const path = productPath(product);
     const skuHint = productSku(product);
+    const [basePage, page2, featuresPage] = await Promise.all([
+      fetchJson(path),
+      fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`),
+      fetchJson(`${path}features/`),
+    ]);
+    const d = parseDetails(basePage, page2);
+    let s = parseSpecs(featuresPage);
+    // If we accidentally hit the short characteristics widget / empty features, retry once.
+    if ((s.fieldCount || 0) < 8) {
+      const retry = await fetchJson(`${path}features/`);
+      const s2 = parseSpecs(retry);
+      if ((s2.fieldCount || 0) > (s.fieldCount || 0)) s = s2;
+    }
+    const short = d.characteristics || {};
+    const full = s.characteristics || {};
+    const characteristics = { ...short, ...full };
+    const extracted =
+      extractHardwareHints(d.name, "", characteristics) || d.extracted;
+    return {
+      sku: d.sku || skuHint,
+      name: d.name,
+      price: d.price,
+      oldPrice: d.oldPrice,
+      rating: d.rating,
+      reviews: d.reviews,
+      available: d.available,
+      url: d.url,
+      seller: d.seller,
+      location: d.location,
+      fieldCount: Object.keys(characteristics).length,
+      sparse: Object.keys(characteristics).length > 0 && Object.keys(characteristics).length < 8,
+      specsIncomplete:
+        Object.keys(characteristics).length === 0 || Object.keys(characteristics).length < 8,
+      characteristics,
+      extracted: Object.keys(extracted || {}).length ? extracted : undefined,
+      error: null,
+    };
+  }
+
+  const rows = [];
+  for (const product of list) {
     try {
-      const [basePage, page2, featuresPage] = await Promise.all([
-        fetchJson(path),
-        fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`),
-        fetchJson(`${path}features/`),
-      ]);
-      const d = parseDetails(basePage, page2);
-      const s = parseSpecs(featuresPage);
-      const short = d.characteristics || {};
-      const full = s.characteristics || {};
-      const characteristics = { ...short, ...full };
-      const extracted =
-        d.extracted ||
-        extractHardwareHints(d.name, d.description?.text, characteristics);
-      rows.push({
-        sku: d.sku || skuHint,
-        name: d.name,
-        price: d.price,
-        oldPrice: d.oldPrice,
-        rating: d.rating,
-        reviews: d.reviews,
-        available: d.available,
-        url: d.url,
-        seller: d.seller,
-        location: d.location,
-        fieldCount: Object.keys(characteristics).length,
-        sparse: Object.keys(characteristics).length > 0 && Object.keys(characteristics).length < 8,
-        specsIncomplete:
-          Object.keys(characteristics).length === 0 || Object.keys(characteristics).length < 8,
-        characteristics,
-        extracted: Object.keys(extracted || {}).length ? extracted : undefined,
-        error: null,
-      });
+      rows.push(await loadOne(product));
     } catch (err) {
       rows.push({
-        sku: skuHint || product,
+        sku: productSku(product) || product,
         name: null,
         price: null,
         characteristics: {},
@@ -672,7 +703,7 @@ export async function compareProducts({ products }) {
     matrix,
     missingKeysByProduct,
     note: rows.some((r) => r.sparse || r.specsIncomplete)
-      ? "Some listings have sparse specs — check extracted{} (from title/text) and prefer another SKU of the same model."
+      ? "Some listings have sparse specs — check extracted{} (title/characteristics only; GPU never from description) and prefer another SKU of the same model."
       : null,
   };
 }

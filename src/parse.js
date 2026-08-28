@@ -431,35 +431,71 @@ export function dedupeSearchItems(items, { colors = true, configs = true } = {})
   return list;
 }
 
-/** Heuristic hardware fields mined from title/description when specs are sparse. */
+/** Heuristic hardware fields — prefer characteristics, then TITLE only (never description for GPU). */
 export function extractHardwareHints(name, descriptionText = "", characteristics = {}) {
-  const charBlob = Object.entries(characteristics || {})
-    .map(([k, v]) => `${k} ${v}`)
-    .join(" ");
-  const text = `${name || ""} ${descriptionText || ""} ${charBlob}`;
+  const title = String(name || "");
+  const charEntries = Object.entries(characteristics || {});
+  const charBlob = charEntries.map(([k, v]) => `${k} ${v}`).join(" ");
   const out = {};
   const set = (key, value, source) => {
     if (value == null || value === "") return;
     out[key] = { value, source };
   };
 
-  const hz = text.match(/(\d{2,3})\s*(?:гц|hz)\b/i);
-  if (hz) set("screenHz", Number(hz[1]), /характеристик|гц|hz/i.test(charBlob) ? "characteristics" : "title");
+  const charVal = (re) => {
+    const hit = charEntries.find(([k]) => re.test(k));
+    return hit ? String(hit[1]).trim() : null;
+  };
 
-  const gpu = text.match(/\b((?:geforce\s*)?rtx\s*\d{3,4}(?:\s*(?:ti|super))?|(?:geforce\s*)?gtx\s*\d{3,4}(?:\s*ti)?|radeon\s*(?:rx\s*)?\d{3,4}(?:\s*xt)?)\b/i);
-  if (gpu) set("gpu", gpu[1].replace(/\s+/g, " ").trim(), "title");
+  const fromCharsGpu = charVal(/видеокарт|график|gpu/i);
+  if (fromCharsGpu) set("gpu", fromCharsGpu, "characteristics");
 
-  const vram = text.match(/(\d{1,2})\s*(?:gb|гб)\s*(?:gddr|видео|vram)/i);
-  if (vram) set("gpuVramGb", Number(vram[1]), "title");
+  const fromCharsHz = charVal(/частота обновления|герц|гц/i);
+  if (fromCharsHz) {
+    const n = fromCharsHz.match(/(\d{2,3})/);
+    if (n) set("screenHz", Number(n[1]), "characteristics");
+  }
 
-  const tgp = text.match(/(\d{2,3})\s*(?:w|вт)\s*(?:tgp|tgp)?/i);
-  if (tgp) set("tgpW", Number(tgp[1]), "title");
+  const fromCharsRam = charVal(/оперативн|озу|ram/i);
+  if (fromCharsRam) {
+    const n = fromCharsRam.match(/(\d{1,3})/);
+    if (n) set("ramGb", Number(n[1]), "characteristics");
+  }
 
-  const ram = text.match(/(\d{1,3})\s*(?:gb|гб)\s*(?:ram|ddr|оператив|озу)?/i);
-  if (ram) set("ramGb", Number(ram[1]), "title");
+  const fromCharsWeight = charVal(/^вес|вес,/i);
+  if (fromCharsWeight) {
+    const n = fromCharsWeight.match(/(\d+(?:[.,]\d+)?)/);
+    if (n) set("weightKg", parseFloat(n[1].replace(",", ".")), "characteristics");
+  }
 
-  const weight = text.match(/(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b/i);
-  if (weight) set("weightKg", parseFloat(weight[1].replace(",", ".")), "title");
+  // Title-only GPU (descriptionText ignored — rival chips in marketing copy).
+  void descriptionText;
+  if (!out.gpu) {
+    const cleanTitle = title.replace(/[™®©]/g, " ");
+    const GPU_RE =
+      /\b((?:nvidia\s+)?(?:geforce\s*)?(?:rtx|gtx)\s*\d{3,4}(?:\s*(?:ti|super))?|(?:amd\s+)?radeon\s*(?:rx\s*)?\d{3,4}\s*[a-z]?|(?:amd\s+)?radeon\s*\d{3}m|(?:intel\s*)?arc\s*[a-z]?\d{3,}[a-z0-9]*|adreno\s*\d{3,}[a-z0-9]*|iris\s*xe(?:\s*[a-z0-9]+)?)\b/i;
+    const m = cleanTitle.match(GPU_RE);
+    if (m) set("gpu", m[1].replace(/\s+/g, " ").trim(), "title");
+  }
+
+  if (!out.screenHz) {
+    const hz = title.match(/(\d{2,3})\s*(?:гц|hz)\b/i);
+    if (hz) set("screenHz", Number(hz[1]), "title");
+  }
+
+  if (!out.ramGb) {
+    const ram = title.match(/(\d{1,3})\s*(?:gb|гб)(?:\s*(?:ram|ddr|оператив|озу))?/i);
+    if (ram) set("ramGb", Number(ram[1]), "title");
+  }
+
+  if (!out.weightKg) {
+    const weight = title.match(/(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b/i);
+    if (weight) set("weightKg", parseFloat(weight[1].replace(",", ".")), "title");
+  }
+
+  // TGP only from title with explicit TGP marker (bare "115W" is too noisy)
+  const tgp = title.match(/(\d{2,3})\s*(?:w|вт)\s*tgp|tgp\s*(\d{2,3})\s*(?:w|вт)?/i);
+  if (tgp) set("tgpW", Number(tgp[1] || tgp[2]), "title");
 
   return out;
 }
@@ -609,7 +645,8 @@ export function parseDetails(basePage, page2) {
 
   const characteristics = parseShortCharacteristics(basePage);
   const description = parseDescription(page2);
-  const extracted = extractHardwareHints(heading?.title || basePage?.seo?.title, description.text, characteristics);
+  // Never feed description into extract — seller copy often cites rival GPUs.
+  const extracted = extractHardwareHints(heading?.title || basePage?.seo?.title, "", characteristics);
 
   return {
     sku,
@@ -646,10 +683,15 @@ const PACKAGING_RE =
 const PRODUCT_RE =
   /экран|диспле|процесс|видеокарт|rtx|gtx|батаре|автоном|клавиатур|производительн|тормоз|греетс|шум|ssd|оператив|озу|вес|герцовк|гц|fps|игр[аыуе]/i;
 
-export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = false } = {}) {
+export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = false, productSku = null } = {}) {
   const w = widget(page, "webListReviews");
   const raw = w?.reviews || w?.items || [];
   const { rating, reviews: total } = parseProductScore(page);
+  const pageSku =
+    productSku ||
+    skuFromUrl(page?.seo?.link?.[0]?.href) ||
+    String(w?.sku || w?.itemId || "") ||
+    null;
 
   let reviews = raw.map((r) => {
     const c = r.content || {};
@@ -663,6 +705,17 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
     const blob = `${comment} ${pros} ${cons}`;
     const aboutProduct =
       PRODUCT_RE.test(blob) || (!PACKAGING_RE.test(blob) && blob.trim().length > 40);
+    const likelySellerGeneric = PACKAGING_RE.test(blob) && !PRODUCT_RE.test(blob);
+    const matchedSku =
+      String(r.itemId || r.sku || r.productId || r.contextItemId || c.itemId || "") || null;
+    const isCrossListing = Boolean(matchedSku && pageSku && matchedSku !== String(pageSku));
+    const reviewsScope = isCrossListing
+      ? "crossListing"
+      : likelySellerGeneric
+        ? "seller"
+        : aboutProduct
+          ? "product"
+          : "unclear";
     return {
       author: author || null,
       score: typeof c.score === "number" ? c.score : null,
@@ -674,6 +727,10 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
       purchased: r.isItemPurchased ?? null,
       hasPhotos: Array.isArray(c.photos) && c.photos.length > 0,
       aboutProduct,
+      likelySellerGeneric,
+      matchedSku,
+      isCrossListing,
+      reviewsScope,
     };
   });
 
@@ -683,20 +740,48 @@ export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = f
   } else if (sort === "date") {
     reviews.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
   } else if (sort === "product") {
-    reviews.sort((a, b) => Number(b.aboutProduct) - Number(a.aboutProduct) || (b.useful || 0) - (a.useful || 0));
+    reviews.sort(
+      (a, b) =>
+        Number(b.aboutProduct && !b.likelySellerGeneric) - Number(a.aboutProduct && !a.likelySellerGeneric) ||
+        Number(b.aboutProduct) - Number(a.aboutProduct) ||
+        (b.useful || 0) - (a.useful || 0)
+    );
   }
 
   reviews = reviews.slice(0, limit);
+  const sellerish = reviews.filter((r) => r.likelySellerGeneric || r.reviewsScope === "seller").length;
+  const about = reviews.filter((r) => r.aboutProduct && !r.likelySellerGeneric).length;
+  const cross = reviews.filter((r) => r.isCrossListing).length;
+  const reviewsLikelySellerPooled =
+    reviews.length >= 3 && sellerish >= Math.ceil(reviews.length * 0.5);
+  const notes = [];
+  if (reviews.length && reviews.filter((r) => r.purchased).length === 0) {
+    notes.push(
+      "No reviews marked purchased=true on this page — common for CN/parallel-import sellers; prefer aboutProduct=true + useful votes."
+    );
+  }
+  if (reviewsLikelySellerPooled) {
+    notes.push(
+      "Many reviews look seller/packaging-generic (reviewsScope=seller) — do not quote as product experience; filter aboutProduct=true."
+    );
+  }
+  if (cross > 0) {
+    notes.push(`${cross} review(s) matched a different SKU (isCrossListing) — may be pooled across seller listings.`);
+  }
+
   return {
     rating,
     totalReviews: total,
+    productSku: pageSku,
     count: reviews.length,
     sort,
+    aboutProductCount: about,
+    sellerGenericCount: sellerish,
+    crossListingCount: cross,
+    sellerGenericShare: reviews.length ? Math.round((sellerish / reviews.length) * 100) / 100 : 0,
+    reviewsLikelySellerPooled,
     reviews,
-    note:
-      reviews.length && reviews.filter((r) => r.purchased).length === 0
-        ? "No reviews marked purchased=true on this page — common for CN/parallel-import sellers; prefer aboutProduct=true + useful votes."
-        : undefined,
+    note: notes.length ? notes.join(" ") : undefined,
   };
 }
 
@@ -788,13 +873,35 @@ export function parseVariants(page) {
 // ── full specs ──────────────────────────────────────────────────────────────────
 
 export function parseSpecs(page) {
-  const w = widget(page, "webCharacteristics");
+  // PDP/features can expose multiple webCharacteristics widgets; pick the richest.
+  const all = widgets(page, "webCharacteristics");
+  let w = null;
+  let bestScore = -1;
+  for (const cand of all) {
+    const n =
+      Number(cand.totalCount) ||
+      (cand.characteristics || []).reduce(
+        (sum, b) => sum + (b.short || []).length + (b.long || []).length + (b.items || []).length,
+        0
+      );
+    if (n > bestScore) {
+      bestScore = n;
+      w = cand;
+    }
+  }
+  if (!w) w = widget(page, "webCharacteristics");
+
   const characteristics = {};
   for (const block of w?.characteristics || []) {
-    for (const item of block.short || []) {
-      const name = item.name;
-      const values = (item.values || []).map((v) => v.text).filter(Boolean);
-      if (name && values.length) characteristics[name] = values.join(", ");
+    const rows = [...(block.short || []), ...(block.long || []), ...(block.items || [])];
+    for (const item of rows) {
+      const name = item.name || item.title || null;
+      const values = (item.values || [])
+        .map((v) => v.text || v.value || (typeof v === "string" ? v : null))
+        .filter(Boolean);
+      if (name && values.length && characteristics[name] == null) {
+        characteristics[name] = values.join(", ");
+      }
     }
   }
   const keys = Object.keys(characteristics);
@@ -818,15 +925,52 @@ export function parseSpecs(page) {
 
 export function parseSellerInfo(page) {
   const w = widget(page, "sellerTransparency");
-  if (!w) return { name: null, logo: null, badges: [], infoUrl: null };
+  if (!w) return { name: null, logo: null, badges: [], infoUrl: null, rating: null };
+
+  const badges = [];
+  for (const b of w.badges || []) {
+    const label =
+      textField(b.text) ||
+      textField(b.title) ||
+      textField(b.label) ||
+      textField(b.common?.title) ||
+      null;
+    const link = cleanUrl(b.common?.action?.link || b.action?.link);
+    // Prefer human text; fall back to a short hint from the modal URL path
+    let display = label;
+    if (!display && link) {
+      const m = link.match(/\/modal\/([^/?#]+)/i);
+      display = m ? m[1].replace(/[-_]+/g, " ") : null;
+    }
+    badges.push({
+      icon: b.leftIcon || b.icon || null,
+      label: display,
+      link,
+    });
+  }
+
+  const name = w.title?.text || null;
+  const subtitle =
+    textField(w.subtitle) ||
+    textField(w.description) ||
+    textField(w.sellerCell?.centerBlock?.subtitle) ||
+    null;
+  const ratingRaw =
+    w.rating?.title?.text ||
+    w.rating?.text ||
+    w.sellerCell?.centerBlock?.title?.text ||
+    null;
+  const rating = ratingRaw ? parseFloat(String(ratingRaw).replace(",", ".")) : null;
+
   return {
-    name: w.title?.text || null,
+    name,
     logo: w.logoImage?.backgroundImage || null,
-    badges: (w.badges || []).map((b) => ({
-      icon: b.leftIcon || null,
-      label: b.common?.action?.link || null,
-    })),
+    subtitle,
+    rating: Number.isFinite(rating) ? rating : null,
+    badges,
     infoUrl: cleanUrl(w.action?.link),
+    isExpress: /express/i.test(name || "") || /ozon-express/i.test(w.logoImage?.backgroundImage || ""),
+    isOfficial: /официальн|official/i.test(name || ""),
   };
 }
 
