@@ -202,38 +202,11 @@ class OzonBrowser:
             await page.goto(map_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await asyncio.sleep(5)
 
-            # After map load anti-bot may reappear — verify session still usable
             title = await page.title()
             if CHALLENGE_RE.search(title):
                 raise RuntimeError(f"challenge during set_city (title: {title})")
 
-            pin_link = await page.evaluate(
-                """async ({ targetLat, targetLng }) => {
-                    const r = await fetch('https://www.ozon.ru/api/composer-api.bx/page/json/v2?url='
-                        + encodeURIComponent(location.pathname + location.search));
-                    const data = await r.json();
-                    let best = null;
-                    let bestDist = Infinity;
-                    for (const [k, v] of Object.entries(data.widgetStates || {})) {
-                        if (!k.startsWith('addressEditMap')) continue;
-                        const amap = JSON.parse(v);
-                        const objs = amap.markerBundle?.mapObjectCollection?.mapObjects || [];
-                        for (const m of objs) {
-                            if (m.type !== 'PIN' || !m.actionLink) continue;
-                            const c = m.coordinates || {};
-                            const lat = c.latitude, lng = c.longitude;
-                            if (lat == null || lng == null) {
-                                if (!best) best = m.actionLink;
-                                continue;
-                            }
-                            const d = (lat - targetLat) ** 2 + (lng - targetLng) ** 2;
-                            if (d < bestDist) { bestDist = d; best = m.actionLink; }
-                        }
-                    }
-                    return best;
-                }""",
-                {"targetLat": lat, "targetLng": lng},
-            )
+            pin_link = await self._resolve_pickup_pin(page, lat, lng)
             if not pin_link:
                 raise RuntimeError(f"no pickup points found near {label}")
 
@@ -257,6 +230,49 @@ class OzonBrowser:
                 raise RuntimeError("location not set after pickup selection")
             log("set_city: ok", label, "→", loc.get("city"))
             return {"ok": True, "requestedCity": label, "location": loc}
+
+    async def _resolve_pickup_pin(self, page, target_lat: float, target_lng: float) -> str | None:
+        """Nearest PIN; if Ozon only returns CLUSTER bubbles, zoom into them until a PIN appears."""
+
+        def dist2(m: dict) -> float:
+            c = m.get("coordinates") or {}
+            la, lo = c.get("latitude"), c.get("longitude")
+            if la is None or lo is None:
+                return float("inf")
+            return (la - target_lat) ** 2 + (lo - target_lng) ** 2
+
+        for depth in range(5):
+            markers = await page.evaluate(
+                """async () => {
+                    const r = await fetch('https://www.ozon.ru/api/composer-api.bx/page/json/v2?url='
+                        + encodeURIComponent(location.pathname + location.search));
+                    const data = await r.json();
+                    const out = [];
+                    for (const [k, v] of Object.entries(data.widgetStates || {})) {
+                        if (!k.startsWith('addressEditMap')) continue;
+                        const amap = JSON.parse(v);
+                        for (const m of amap.markerBundle?.mapObjectCollection?.mapObjects || []) {
+                            out.push(m);
+                        }
+                    }
+                    return out;
+                }"""
+            )
+            pins = [m for m in markers if m.get("type") == "PIN" and m.get("actionLink")]
+            if pins:
+                pins.sort(key=dist2)
+                return pins[0]["actionLink"]
+
+            clusters = [m for m in markers if m.get("type") == "CLUSTER" and m.get("actionLink")]
+            if not clusters:
+                return None
+            clusters.sort(key=dist2)
+            zoom_link = clusters[0]["actionLink"]
+            log(f"set_city: zoom cluster depth={depth}", zoom_link[:80])
+            await page.goto(HOME.rstrip("/") + zoom_link, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await asyncio.sleep(3)
+
+        return None
 
     async def shutdown(self) -> None:
         if self._idle_task:
