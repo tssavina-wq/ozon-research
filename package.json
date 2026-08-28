@@ -1,6 +1,6 @@
 {
   "name": "ozon-customer-mcp",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "MCP server for Ozon customer marketplace: search, product data, sellers, catalogs and delivery city via Camoufox",
   "type": "module",
   "bin": {

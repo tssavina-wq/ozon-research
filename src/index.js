@@ -126,7 +126,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.2" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.3" });
 
 server.registerTool(
   "ozon_search",
@@ -190,9 +190,9 @@ server.registerTool(
     description:
       "Full product card for one item. Use when you already have sku or product URL from ozon_search. " +
       "Returns: name, price/cardPrice/oldPrice, availability, seller name+rating, images, " +
-      "short characteristics (5–10 fields), text description, and location {city, region} " +
-      "(delivery dates elsewhere refer to this city). " +
-      "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews. For Q&A use ozon_product_questions.",
+      "short characteristics (5–10 fields), text description, location {city, region, pickupAddress}, " +
+      "and delivery { summary, best, options[] } for the CURRENT listing (courier/PVZ dates for session city). " +
+      "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews. For other sellers use ozon_product_offers.",
     inputSchema: {
       product: productId.optional().describe("SKU, URL, or slug"),
       sku: z.string().min(1).optional().describe("Alias for product (same meaning)"),
@@ -258,15 +258,19 @@ server.registerTool(
   {
     title: "Compare Ozon seller offers",
     description:
-      "Lists all sellers offering the SAME product (different listings/prices). " +
-      "Use when user wants the cheapest option or asks 'who sells it cheaper'. " +
-      "Returns location {city, region}, per seller: price, rating, reviews count, delivery hint, productUrl, sellerUrl. " +
-      "Delivery dates are for location.city — call ozon_search_cities then ozon_set_city if user asked about another city. " +
-      "Requires product sku (from ozon_search or ozon_product_details).",
+      "Lists sellers for the product cluster. includeCurrent=true (default) prepends THIS card's seller " +
+      "with isCurrentListing=true and delivery from the product page (not only /otherOffers). " +
+      "Each row: price, rating, delivery text, advantages[] (all badges, not only first), productUrl, sellerUrl. " +
+      "Delivery dates follow location.city / pickupAddress — call ozon_search_cities then ozon_set_city " +
+      "(optionally with address for a specific PVZ area) first. Requires product sku.",
     inputSchema: {
       product: productId.optional(),
       sku: z.string().min(1).optional(),
       sort: z.enum(["price", "rating", "delivery"]).default("price").describe("Sort offers by price, rating, or delivery"),
+      includeCurrent: z
+        .boolean()
+        .optional()
+        .describe("Prepend current product-card seller with delivery (default true)"),
       limit: limitSchema(36, 12).describe("Max offers to return"),
     },
     annotations: readOnly,
@@ -476,7 +480,7 @@ server.registerTool(
     title: "Get Ozon delivery location",
     description:
       "Current delivery city/region for this browser session. Anonymous sessions default to Москва. " +
-      "Use before quoting delivery dates from ozon_product_offers. Returns { city, region }.",
+      "Use before quoting delivery dates. Returns { city, region, pickupAddress }.",
     inputSchema: {},
     annotations: readOnly,
   },
@@ -490,10 +494,16 @@ server.registerTool(
     description:
       "Change delivery city for the session (picks a pickup point via Ozon map). " +
       "Call ozon_search_cities first to show the user valid options from Ozon. " +
-      "Returns requestedCity (what you asked for) and location (actual Ozon session, city may be a suburb). " +
-      "Affects delivery dates in ozon_product_offers. Takes ~20–40s.",
+      "Pass address to bias PVZ toward a street/district (e.g. city=Зеленоград, address=\"Заводская 14к2\"). " +
+      "Returns requestedCity and location { city, region, pickupAddress }. " +
+      "Affects delivery in ozon_product_details / ozon_product_offers. Takes ~20–40s.",
     inputSchema: {
       city: z.string().min(1).describe('City name from ozon_search_cities results, e.g. "Казань"'),
+      address: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Optional street/district to bias PVZ, e.g. "Заводская улица 14к2" or "8 микрорайон"'),
       lat: z.number().optional().describe("Optional lat from ozon_search_cities (exact match)"),
       lng: z.number().optional().describe("Optional lng from ozon_search_cities (exact match)"),
     },

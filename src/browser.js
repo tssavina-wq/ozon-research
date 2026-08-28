@@ -98,6 +98,24 @@ export async function fetchJson(path, { retries = 2 } = {}) {
   }
 }
 
+/** Absolute or /api/... URL fetch inside Camoufox session (for async widgets). */
+export async function fetchUrl(url, { retries = 1, method = "GET", body = undefined } = {}) {
+  const payload = { url, retries, method };
+  if (body !== undefined) payload.body = body;
+  try {
+    return await call("fetch_url", payload);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (/exited|EPIPE|not writable|closed|destroyed/i.test(msg)) {
+      log("browser bridge lost, restarting…");
+      proc = null;
+      rl = null;
+      return call("fetch_url", payload);
+    }
+    throw err;
+  }
+}
+
 export async function warmup() {
   ensureProcess();
   return call("warmup");

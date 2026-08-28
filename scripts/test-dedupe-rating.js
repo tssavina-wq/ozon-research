@@ -7,6 +7,8 @@ import {
   extractHardwareHints,
   parseSpecs,
   parseReviews,
+  parseDelivery,
+  parseOffers,
   _internal,
 } from "../src/parse.js";
 import { inferCategoryFromQuery } from "../src/ozon.js";
@@ -166,6 +168,70 @@ ok(!specs.sparse, "rich specs not sparse");
 ok(inferCategoryFromQuery("ультрабук dual screen") === "noutbuki-15692", "ultrabook → laptops");
 ok(inferCategoryFromQuery("игровой ноутбук RTX") === "igrovye-noutbuki-15821", "gaming laptop category");
 ok(inferCategoryFromQuery("iphone 15") == null, "phone query no laptop pin");
+ok(
+  inferCategoryFromQuery("СЖО Arctic Liquid Freezer") === "sistemy-ohlazhdeniya-dlya-igrovyh-pk-15732",
+  "СЖО → water cooling category"
+);
+
+const delivery = parseDelivery({
+  state: {
+    title: "Доставка и возврат",
+    sections: [
+      {
+        type: "addressSelect",
+        descriptionRs: [
+          { type: "text", content: "Зеленоград" },
+          { type: "newLine" },
+          { type: "text", content: "Укажите полный адрес" },
+        ],
+      },
+      { type: "separator" },
+      {
+        descriptionRs: [
+          { type: "text", content: "Курьером Ozon Express" },
+          { type: "newLine" },
+          { type: "text", content: "Сегодня, 29 августа" },
+        ],
+        priceBadge: { text: "Входит в заказ" },
+      },
+      {
+        descriptionRs: [
+          { type: "text", content: "Пункты выдачи и постаматы" },
+          { type: "newLine" },
+          { type: "text", content: "Завтра, 30 августа" },
+        ],
+      },
+    ],
+  },
+});
+ok(delivery.options.length === 2, "delivery options parsed");
+ok(/сегодня/i.test(delivery.best?.dateText || ""), "best prefers express today");
+ok(/Express/i.test(delivery.summary || ""), "summary has express");
+
+const offersPage = {
+  widgetStates: {
+    "webSellerList-1": JSON.stringify({
+      sellers: [
+        {
+          id: "1",
+          sku: "100",
+          name: "OtherShop",
+          advantages: [
+            { key: "promo", contentRs: { headRs: [{ type: "text", content: "Скидка" }] } },
+            {
+              key: "delivery",
+              contentRs: { headRs: [{ type: "text", content: "Доставим послезавтра" }] },
+            },
+          ],
+          price: { price: "1000 ₽" },
+        },
+      ],
+    }),
+  },
+};
+const offers = parseOffers(offersPage, 5);
+ok(offers.sellers[0].delivery === "Доставим послезавтра", "delivery from advantages key not [0]");
+ok(offers.sellers[0].advantages.length === 2, "all advantages kept");
 
 const reviewsPage = {
   widgetStates: {

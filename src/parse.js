@@ -43,7 +43,7 @@ function priceToNumber(text) {
   return digits ? parseInt(digits, 10) : null;
 }
 
-/** Composer page.location.current → { city, region } for delivery context. */
+/** Composer page.location.current → { city, region, pickupAddress } for delivery context. */
 export function parseLocation(page) {
   const cur = page?.location?.current;
   if (!cur) return null;
@@ -59,7 +59,118 @@ export function parseLocation(page) {
     if (parts[0] === "Россия" && parts.length >= 2) region = parts[1];
     else if (parts.length >= 2) region = parts[0] === city ? parts[1] : parts[0];
   }
-  return { city, region };
+  const pickupAddress = full && !full.startsWith("{{") ? full : null;
+  return { city, region, pickupAddress };
+}
+
+/** Find layout node for an async widget (e.g. webDelivery). */
+export function findLayoutWidget(page, component) {
+  const out = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (typeof node === "object") {
+      if (node.component === component) out.push(node);
+      for (const v of Object.values(node)) walk(v);
+    }
+  };
+  walk(page?.layout);
+  return out[0] || null;
+}
+
+function rsNodesText(nodes) {
+  if (!nodes) return null;
+  if (typeof nodes === "string") return nodes;
+  const parts = [];
+  for (const n of Array.isArray(nodes) ? nodes : [nodes]) {
+    if (!n) continue;
+    if (typeof n === "string") parts.push(n);
+    else if (n.type === "newLine") parts.push("\n");
+    else if (n.content || n.text) parts.push(n.content || n.text);
+  }
+  const t = parts.join("").replace(/[ \t]+/g, " ").replace(/\n+/g, "\n").trim();
+  return t || null;
+}
+
+/**
+ * Parse async webDelivery widget state (POST composer widget/json/v2).
+ * Returns options for courier / PVZ with human date text.
+ */
+export function parseDelivery(state) {
+  const root = state?.state || state;
+  if (!root || typeof root !== "object") {
+    return { title: null, options: [], addressHint: null, best: null };
+  }
+  const options = [];
+  let addressHint = null;
+  for (const sec of root.sections || []) {
+    if (sec.type === "separator") continue;
+    const lines = rsNodesText(sec.descriptionRs);
+    if (!lines) continue;
+    const [titleLine, ...rest] = lines.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (sec.type === "addressSelect") {
+      addressHint = rest.join(" ") || titleLine || null;
+      continue;
+    }
+    const dateText = rest.join(" ") || null;
+    const badge = sec.priceBadge?.text || null;
+    const title = titleLine || null;
+    const kind = /пункт|постамат|пвз|самовывоз/i.test(title || "")
+      ? "pickup"
+      : /express/i.test(title || "")
+        ? "express"
+        : /куриер|курьер/i.test(title || "")
+          ? "courier"
+          : "other";
+    options.push({
+      title,
+      dateText,
+      priceBadge: badge,
+      kind,
+      text: [title, dateText].filter(Boolean).join(" — "),
+    });
+  }
+  const best =
+    options.find((o) => o.kind === "express" && o.dateText) ||
+    options.find((o) => o.kind === "pickup" && o.dateText) ||
+    options.find((o) => o.dateText) ||
+    options[0] ||
+    null;
+  return {
+    title: root.title || null,
+    addressHint,
+    options,
+    best,
+    summary: best?.text || null,
+  };
+}
+
+function parseOfferAdvantages(advantages) {
+  const list = [];
+  for (const a of advantages || []) {
+    const text =
+      rsText(a.contentRs?.headRs) ||
+      rsText(a.contentRs?.textRs) ||
+      rsNodesText(a.contentRs?.headRs) ||
+      rsText(a.text) ||
+      null;
+    if (!text) continue;
+    list.push({
+      key: a.key || null,
+      text,
+      icon: a.iconKey || null,
+    });
+  }
+  const delivery =
+    list.find((x) => x.key === "delivery")?.text ||
+    list.find((x) => /достав|завтра|сегодня|послезавтра|\d+\s+(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)/i.test(x.text))
+      ?.text ||
+    list[0]?.text ||
+    null;
+  return { advantages: list, delivery };
 }
 
 /** strip ?at=... tracking and make absolute */
@@ -664,6 +775,7 @@ export function parseDetails(basePage, page2) {
     extracted: Object.keys(extracted).length ? extracted : undefined,
     description,
     location: parseLocation(basePage),
+    delivery: null,
   };
 }
 
@@ -865,22 +977,27 @@ function offersActiveSort(sortW) {
 export function parseOffers(page, limit = 12) {
   const w = widget(page, "webSellerList");
   const sortW = widget(page, "webSellersSortSwitcher");
-  const sellers = (w?.sellers || []).slice(0, limit).map((s) => ({
-    sellerId: s.id || null,
-    sku: String(s.sku || "") || null,
-    name: s.name || null,
-    rating: s.rating?.totalScore ?? null,
-    reviews: s.rating?.reviewsCount ?? null,
-    price:
-      priceToNumber(s.price?.cardPrice?.price) ??
-      priceToNumber(s.price?.price) ??
-      priceToNumber(s.price?.originalPrice) ??
-      null,
-    delivery: rsText(s.advantages?.[0]?.contentRs?.headRs) || null,
-    sellerUrl: cleanUrl(s.link),
-    productUrl: cleanUrl(s.productLink),
-    image: s.coverImage || null,
-  }));
+  const sellers = (w?.sellers || []).slice(0, limit).map((s) => {
+    const { advantages, delivery } = parseOfferAdvantages(s.advantages);
+    return {
+      sellerId: s.id || null,
+      sku: String(s.sku || "") || null,
+      name: s.name || null,
+      rating: s.rating?.totalScore ?? null,
+      reviews: s.rating?.reviewsCount ?? null,
+      price:
+        priceToNumber(s.price?.cardPrice?.price) ??
+        priceToNumber(s.price?.price) ??
+        priceToNumber(s.price?.originalPrice) ??
+        null,
+      delivery,
+      advantages,
+      isCurrentListing: false,
+      sellerUrl: cleanUrl(s.link),
+      productUrl: cleanUrl(s.productLink),
+      image: s.coverImage || null,
+    };
+  });
   return {
     sort: offersActiveSort(sortW),
     count: sellers.length,
@@ -1144,7 +1261,11 @@ export const _internal = {
   cleanUrl,
   skuFromUrl,
   widget,
+  widgets,
   parseSearchItem,
   parseProductScore,
   modelKey,
+  parseDelivery,
+  parseOfferAdvantages,
+  findLayoutWidget,
 };

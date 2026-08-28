@@ -140,6 +140,65 @@ class OzonBrowser:
 
         raise RuntimeError("fetch_json exhausted retries")
 
+    async def _fetch_url_once(self, url: str, method: str = "GET", body: dict | None = None) -> dict | list | str:
+        if not self._challenged:
+            await self.start()
+        self._reset_idle()
+        payload = {
+            "url": url,
+            "method": (method or "GET").upper(),
+            "body": body,
+        }
+        result = await self._page.evaluate(
+            """async ({ url, method, body }) => {
+                const opts = { method, headers: { accept: "application/json" } };
+                if (body != null) {
+                    opts.headers["content-type"] = "application/json";
+                    opts.body = JSON.stringify(body);
+                }
+                const r = await fetch(url, opts);
+                const text = await r.text();
+                return { status: r.status, text };
+            }""",
+            payload,
+        )
+        status = result["status"]
+        if status != 200:
+            raise RuntimeError(f"Ozon returned HTTP {status}")
+        try:
+            return json.loads(result["text"])
+        except Exception:
+            return result["text"]
+
+    async def fetch_url(
+        self,
+        url: str,
+        retries: int = 1,
+        method: str = "GET",
+        body: dict | None = None,
+    ) -> dict | list | str:
+        async with self._lock:
+            for attempt in range(retries + 1):
+                try:
+                    return await self._fetch_url_once(url, method=method, body=body)
+                except RuntimeError as err:
+                    msg = str(err)
+                    if "HTTP 404" in msg or "HTTP 400" in msg:
+                        raise
+                    retryable = (
+                        "HTTP 403" in msg
+                        or "HTTP 307" in msg
+                        or "challenge" in msg.lower()
+                        or "TargetClosed" in msg
+                        or "closed" in msg.lower()
+                    )
+                    if attempt < retries and (retryable or "HTTP" not in msg):
+                        log(msg, "relaunching session…")
+                        await self.shutdown()
+                        continue
+                    raise
+        raise RuntimeError("fetch_url exhausted retries")
+
     async def _post_action(self, action: str, payload: dict) -> dict:
         if not self._challenged:
             await self.start()
@@ -329,6 +388,14 @@ async def handle_commands() -> None:
 
             if cmd == "fetch":
                 data = await browser.fetch_json(req["path"], retries=int(req.get("retries", 1)))
+                respond({"id": req_id, "ok": True, "data": data})
+            elif cmd == "fetch_url":
+                data = await browser.fetch_url(
+                    req["url"],
+                    retries=int(req.get("retries", 1)),
+                    method=req.get("method") or "GET",
+                    body=req.get("body"),
+                )
                 respond({"id": req_id, "ok": True, "data": data})
             elif cmd == "warmup":
                 await browser.start()

@@ -1,5 +1,5 @@
 // High-level Ozon operations: build composer-api paths, fetch via the browser, parse to plain data.
-import { fetchJson, getLocation, searchCities, setCity } from "./browser.js";
+import { fetchJson, fetchUrl, getLocation, searchCities, setCity } from "./browser.js";
 import {
   parseSearch,
   parseDetails,
@@ -19,6 +19,8 @@ import {
   modelKey,
   baseModelKey,
   extractHardwareHints,
+  findLayoutWidget,
+  parseDelivery,
 } from "./parse.js";
 import {
   filtersNeedResolve,
@@ -39,7 +41,30 @@ const QUERY_CATEGORY_HINTS = [
     category: "noutbuki-15692",
   },
   { re: /беспроводн\S*\s+мыш|wireless\s+mouse/i, category: "besprovodnye-myshi-31940" },
+  {
+    re: /\bсжо\b|aio\s*cooler|liquid\s*freezer|водян\S*\s+охлажд|система\s+жидкостн\S*\s+охлажд/i,
+    category: "sistemy-ohlazhdeniya-dlya-igrovyh-pk-15732",
+  },
 ];
+
+const WIDGET_JSON_V2 = "https://www.ozon.ru/api/composer-api.bx/widget/json/v2";
+
+/** Resolve async onPageLoad widgets (webDelivery lives here, not in initial page JSON). */
+export async function fetchAsyncWidget(page, component) {
+  const node = findLayoutWidget(page, component);
+  if (!node?.asyncData) return null;
+  let url = "/";
+  try {
+    const decoded = JSON.parse(Buffer.from(node.asyncData, "base64").toString("utf8"));
+    if (decoded?.url) url = decoded.url;
+  } catch {
+    /* keep default */
+  }
+  return fetchUrl(WIDGET_JSON_V2, {
+    method: "POST",
+    body: { asyncData: node.asyncData, url },
+  });
+}
 
 export function inferCategoryFromQuery(query) {
   const q = String(query || "").trim();
@@ -468,7 +493,22 @@ export async function details({ product }) {
     fetchJson(path),
     fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`),
   ]);
-  return parseDetails(basePage, page2);
+  const d = parseDetails(basePage, page2);
+  try {
+    const raw = await fetchAsyncWidget(basePage, "webDelivery");
+    const delivery = parseDelivery(raw);
+    if (delivery.options.length || delivery.summary) d.delivery = delivery;
+  } catch (err) {
+    d.delivery = {
+      title: null,
+      options: [],
+      addressHint: null,
+      best: null,
+      summary: null,
+      error: err?.message || String(err),
+    };
+  }
+  return d;
 }
 
 export async function reviews({
@@ -498,12 +538,53 @@ export async function questions({ product, limit = 10 }) {
   return parseQuestions(page, limit);
 }
 
-export async function offers({ product, sort = "price", limit = 12 }) {
+export async function offers({ product, sort = "price", limit = 12, includeCurrent = true } = {}) {
   const sku = productSku(product);
   if (!sku) throw new Error("could not resolve product sku");
   const offerSort = OFFERS_SORT_MAP[sort] || "price";
   const page = await fetchJson(`/modal/otherOffersFromSellers?product_id=${sku}&sort=${offerSort}`);
-  return { product: sku, ...parseOffers(page, limit) };
+  const parsed = parseOffers(page, includeCurrent ? Math.max(0, limit - 1) : limit);
+
+  if (includeCurrent) {
+    try {
+      const current = await details({ product: sku });
+      const currentRow = {
+        sellerId: null,
+        sku: current.sku || sku,
+        name: current.seller?.name || null,
+        rating: current.seller?.rating ?? null,
+        reviews: null,
+        price: current.price ?? null,
+        delivery: current.delivery?.summary || current.delivery?.best?.text || null,
+        advantages: (current.delivery?.options || []).map((o) => ({
+          key: o.kind,
+          text: o.text,
+          icon: null,
+        })),
+        isCurrentListing: true,
+        sellerUrl: current.seller?.url || null,
+        productUrl: current.url || null,
+        image: current.images?.[0] || null,
+      };
+      // Dedupe if otherOffers already lists same seller+price
+      const rest = parsed.sellers.filter(
+        (s) =>
+          !(
+            s.sku === currentRow.sku &&
+            s.price === currentRow.price &&
+            String(s.name || "").toLowerCase() === String(currentRow.name || "").toLowerCase()
+          )
+      );
+      parsed.sellers = [currentRow, ...rest].slice(0, limit);
+      parsed.count = parsed.sellers.length;
+      parsed.location = current.location || parsed.location;
+      parsed.currentDelivery = current.delivery || null;
+    } catch (err) {
+      parsed.currentListingError = err?.message || String(err);
+    }
+  }
+
+  return { product: sku, includeCurrent: Boolean(includeCurrent), ...parsed };
 }
 
 export async function variants({ product }) {
@@ -745,9 +826,13 @@ export async function searchCitiesTool({ query, limit = 10 }) {
   return searchCities(String(query).trim(), limit);
 }
 
-export async function setLocation({ city, lat, lng }) {
+export async function setLocation({ city, lat, lng, address } = {}) {
   if (!city || !String(city).trim()) throw new Error("city is required");
-  return setCity(String(city).trim(), { lat, lng });
+  const query = address && String(address).trim()
+    ? `${String(city).trim()}, ${String(address).trim()}`
+    : String(city).trim();
+  // Pass fuller query as city so suggest resolves near the street/PVZ area.
+  return setCity(query, { lat, lng });
 }
 
 export const _paths = { productPath, productSku, catalogPath };
