@@ -18,6 +18,7 @@ import {
   categoryBrowse,
   brandCatalog,
   relatedProducts,
+  compareProducts,
   searchFilters,
   location,
   searchCitiesTool,
@@ -44,6 +45,30 @@ const sortSchema = z
   .default("popular");
 
 const limitSchema = (max, def) => z.number().int().min(1).max(max).default(def);
+
+/** Arbitrary Ozon facet filters — keys from ozon_search_filters. */
+const filtersSchema = z
+  .record(
+    z.string(),
+    z.union([
+      z.string(),
+      z.number(),
+      z.boolean(),
+      z.array(z.union([z.string(), z.number()])),
+      z.object({
+        min: z.number().optional(),
+        max: z.number().optional(),
+      }),
+    ])
+  )
+  .optional()
+  .describe(
+    'Facet filters from ozon_search_filters. Examples: {"brand":"100867541"}, ' +
+      '{"brand":"ATTACK SHARK"}, {"brand":["100867541","26303256"]}, ' +
+      '{"mouseconnection":279146,"is_promo":true}, ' +
+      '{"maxamplificationmouse":{"min":18000,"max":50000}}, ' +
+      '{"category":"besprovodnye-myshi-31940"}. Titles are resolved to keys when needed.'
+  );
 
 const readOnly = { readOnlyHint: true, openWorldHint: true, idempotentHint: true };
 
@@ -86,7 +111,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.3.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.4.0" });
 
 server.registerTool(
   "ozon_search",
@@ -95,15 +120,26 @@ server.registerTool(
     description:
       "Entry point for product discovery on ozon.ru. Use when the user asks to find, look up, or compare products " +
       "by name or keywords. Returns sku, name, price (RUB number), oldPrice, discount, rating, review count, brand, " +
-      "image URL and clean product link. Use priceMin/priceMax for budget filters. " +
-      "If count is 0, read hint/suggestedCategory and call ozon_category_browse or ozon_search_filters — " +
-      "broad queries often redirect to a category. " +
-      "Next step: ozon_product_details(sku) for full card, or ozon_product_offers(sku) to compare sellers.",
+      "image URL and clean product link. Use priceMin/priceMax for budget and filters{} for facets " +
+      "(brand, delivery, mouseconnection, … — keys from ozon_search_filters). " +
+      "Optional category pins results to a category slug. " +
+      "If count is 0, read hint/suggestedCategory. " +
+      "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
-      query: z.string().min(1).describe('Keywords, e.g. "Steam Deck OLED", "iphone 15", "наушники sony"'),
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Keywords, e.g. "Steam Deck OLED", "iphone 15". Optional if category or filters.category set.'),
+      category: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Category slug like besprovodnye-myshi-31940 — prefer over guessing inside filters"),
       sort: sortSchema.describe("popular | price (cheap first) | price_desc | rating | new | discount"),
       priceMin: z.number().int().nonnegative().optional().describe("Minimum price in rubles"),
       priceMax: z.number().int().nonnegative().optional().describe("Maximum price in rubles"),
+      filters: filtersSchema,
       limit: limitSchema(36, 12).describe("How many products to return (1–36)"),
     },
     annotations: readOnly,
@@ -253,12 +289,13 @@ server.registerTool(
       "or browsing a department. Returns products, breadcrumbs, top brands in category. " +
       "IMPORTANT: Ozon matches the numeric id only — a hallucinated slug like myshi-15721 can silently open " +
       "videokarty-15721. Always copy the slug from ozon_search_filters (active category URL) or a real ozon.ru link. " +
-      "Mismatch of text prefix vs real category → error.",
+      "Mismatch of text prefix vs real category → error. Supports filters{} like ozon_search.",
     inputSchema: {
       category: catalogId("Exact category slug from filters/URL, e.g. besprovodnye-myshi-31940 — not a guessed name-id"),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
+      filters: filtersSchema,
       limit: limitSchema(36, 12),
     },
     annotations: readOnly,
@@ -273,12 +310,13 @@ server.registerTool(
     description:
       "Official brand storefront on Ozon (Apple, Samsung, Baseus, etc.). " +
       "Accepts brand name (\"Baseus\"), slug-id (\"apple-26303000\"), or /brand/... URL. " +
-      "Plain names are resolved via Ozon search. Returns brand products (ads filtered out).",
+      "Plain names are resolved via Ozon search. Returns brand products (ads filtered out). Supports filters{}.",
     inputSchema: {
       brand: catalogId('Brand name "Baseus", slug-id "apple-26303000", or https://www.ozon.ru/brand/... URL'),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
+      filters: filtersSchema,
       limit: limitSchema(36, 12),
     },
     annotations: readOnly,
@@ -304,16 +342,42 @@ server.registerTool(
 );
 
 server.registerTool(
+  "ozon_compare_products",
+  {
+    title: "Compare Ozon products side-by-side",
+    description:
+      "Fetch details+specs for 2–6 products in one call and build a characteristic matrix. " +
+      "Use for 'which is better', hardware shootouts, or top-N after search. " +
+      "Returns products[] (price, rating, seller, characteristics) and matrix[specName][sku]=value. " +
+      "Sparse listings stay sparse — null means Ozon had no field, do not invent values.",
+    inputSchema: {
+      products: z
+        .array(productId)
+        .min(2)
+        .max(6)
+        .describe("2–6 product SKUs, URLs, or slugs to compare"),
+    },
+    annotations: readOnly,
+  },
+  tool("ozon_compare_products", compareProducts, 120000)
+);
+
+server.registerTool(
   "ozon_search_filters",
   {
     title: "Get Ozon search filters",
     description:
-      "Available filters and sort options for a search query BEFORE searching. Use to discover brands, " +
-      "delivery options, price ranges, or explain to user what filters exist. " +
-      "Returns: filters[] (brand, delivery, promo, etc.), activeFilters, sortOptions. " +
-      "Does not return products — pair with ozon_search or ozon_category_browse.",
+      "Available filters and sort options BEFORE / alongside searching. Use to discover brand keys, " +
+      "delivery options, attribute facets, then pass those keys into ozon_search filters{}. " +
+      "Returns: filters[] (key, type, options with key+title), activeFilters, sortOptions. " +
+      "Does not return products.",
     inputSchema: {
-      query: z.string().min(1).describe('Same query you plan to search, e.g. "iphone 15"'),
+      query: z.string().min(1).optional().describe('Search text, e.g. "iphone 15" (optional if category set)'),
+      category: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Category slug to list facets for, e.g. besprovodnye-myshi-31940"),
     },
     annotations: readOnly,
   },

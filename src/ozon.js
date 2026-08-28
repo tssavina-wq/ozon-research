@@ -15,6 +15,13 @@ import {
   parseRelatedProducts,
   parseSearchFilters,
 } from "./parse.js";
+import {
+  filtersNeedResolve,
+  resolveFilterTitles,
+  serializeFilters,
+  mergeFilterParams,
+  looksResolvedFilterValue,
+} from "./filters.js";
 import { _internal } from "./parse.js";
 
 const { skuFromUrl } = _internal;
@@ -217,23 +224,94 @@ function appendCatalogParams(url, { sort = "popular", priceMin, priceMax } = {})
   return qs ? `${base}?${qs}` : base;
 }
 
-export async function search({ query, sort = "popular", priceMin, priceMax, limit = 12 }) {
-  if (!query || !String(query).trim()) throw new Error("query is required");
-  let url = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
-  url = appendCatalogParams(url, { sort, priceMin, priceMax });
+/** Build catalog URL with sort/price + arbitrary Ozon filters. */
+async function buildCatalogUrl({
+  query,
+  category,
+  sort = "popular",
+  priceMin,
+  priceMax,
+  filters,
+}) {
+  let applied = filters && typeof filters === "object" ? { ...filters } : {};
+  let base;
+  if (category) {
+    base = catalogPath(category, "category");
+  } else if (query) {
+    base = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
+  } else if (applied.category) {
+    base = null; // filled after resolve
+  } else {
+    throw new Error("query or category is required");
+  }
+
+  if (filtersNeedResolve(applied) || (!category && applied.category && !/^[a-z0-9-]+-\d+$/i.test(String(applied.category)))) {
+    let probeBase = base;
+    if (!probeBase) {
+      if (query) {
+        probeBase = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
+      } else if (looksResolvedFilterValue(applied.category)) {
+        probeBase = catalogPath(String(applied.category), "category");
+      } else {
+        probeBase = `/search/?text=${encodeURIComponent(String(applied.category))}&from_global=true`;
+      }
+    }
+    const probe = await fetchJson(appendCatalogParams(probeBase, { sort, priceMin, priceMax }));
+    const catalog = parseSearchFilters(probe, query || "");
+    applied = resolveFilterTitles(applied, catalog);
+  }
+
+  const { category: catFromFilters, params: filterParams } = serializeFilters(applied);
+  const cat = category || catFromFilters;
+  if (cat) {
+    base = catalogPath(cat, "category");
+  } else if (!base) {
+    if (!query) throw new Error("query or category is required");
+    base = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
+  }
+
+  let url = appendCatalogParams(base, { sort, priceMin, priceMax });
+  url = mergeFilterParams(url, filterParams);
+  return { url, category: cat || null, appliedFilters: applied };
+}
+
+export async function search({
+  query,
+  category,
+  sort = "popular",
+  priceMin,
+  priceMax,
+  filters,
+  limit = 12,
+} = {}) {
+  if ((!query || !String(query).trim()) && !category && !(filters && filters.category)) {
+    throw new Error("query or category is required");
+  }
+  const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
+    query: query ? String(query).trim() : undefined,
+    category,
+    sort,
+    priceMin,
+    priceMax,
+    filters,
+  });
   const page = await fetchJson(url);
+  if (resolvedCategory) assertCategorySlug(resolvedCategory, page);
+
   const parsed = parseSearch(page, limit);
   const out = {
-    query,
+    query: query ? String(query).trim() : null,
+    category: resolvedCategory,
     sort,
+    filters: appliedFilters && Object.keys(appliedFilters).length ? appliedFilters : undefined,
     count: parsed.count,
     items: parsed.items,
   };
   if (parsed.sponsoredOnly) out.sponsoredOnly = true;
 
   if (parsed.count === 0) {
-    const filters = parseSearchFilters(page, query);
-    const cat = filters.filters?.find((f) => f.key === "category");
+    const filt = parseSearchFilters(page, query || "");
+    const cat = filt.filters?.find((f) => f.key === "category");
     const active = (cat?.options || []).find((o) => o.active && /\/category\//.test(o.url || ""));
     const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1];
     if (slug) {
@@ -242,7 +320,8 @@ export async function search({ query, sort = "popular", priceMin, priceMax, limi
         `Try ozon_category_browse({ category: "${slug}" }) or ozon_search_filters.`;
       out.suggestedCategory = slug;
     } else {
-      out.hint = "No products found. Try ozon_search_filters to discover categories/brands, or a more specific query.";
+      out.hint =
+        "No products found. Try ozon_search_filters for filter keys, loosen filters, or a more specific query.";
     }
   }
   return out;
@@ -301,17 +380,42 @@ export async function sellerCatalog({ seller, sort = "popular", priceMin, priceM
   return parseSellerCatalog(page, limit);
 }
 
-export async function categoryBrowse({ category, sort = "popular", priceMin, priceMax, limit = 12 }) {
-  const path = appendCatalogParams(catalogPath(category, "category"), { sort, priceMin, priceMax });
-  const page = await fetchJson(path);
-  assertCategorySlug(category, page);
-  return parseCategoryBrowse(page, limit);
+export async function categoryBrowse({
+  category,
+  sort = "popular",
+  priceMin,
+  priceMax,
+  filters,
+  limit = 12,
+} = {}) {
+  const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
+    category,
+    sort,
+    priceMin,
+    priceMax,
+    filters,
+  });
+  const page = await fetchJson(url);
+  assertCategorySlug(resolvedCategory || category, page);
+  const result = parseCategoryBrowse(page, limit);
+  if (appliedFilters && Object.keys(appliedFilters).length) result.filters = appliedFilters;
+  return result;
 }
 
-export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax, limit = 12 }) {
-  const path = appendCatalogParams(await resolveBrandPath(brand), { sort, priceMin, priceMax });
-  const page = await fetchJson(path);
-  return parseBrandCatalog(page, limit);
+export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax, filters, limit = 12 }) {
+  const brandPath = await resolveBrandPath(brand);
+  let applied = filters && typeof filters === "object" ? { ...filters } : {};
+  if (filtersNeedResolve(applied)) {
+    const probe = await fetchJson(appendCatalogParams(brandPath, { sort, priceMin, priceMax }));
+    applied = resolveFilterTitles(applied, parseSearchFilters(probe, brand));
+  }
+  const { params: filterParams } = serializeFilters(applied);
+  let url = appendCatalogParams(brandPath, { sort, priceMin, priceMax });
+  url = mergeFilterParams(url, filterParams);
+  const page = await fetchJson(url);
+  const result = parseBrandCatalog(page, limit);
+  if (Object.keys(applied).length) result.filters = applied;
+  return result;
 }
 
 export async function relatedProducts({ product, limit = 12 }) {
@@ -320,10 +424,101 @@ export async function relatedProducts({ product, limit = 12 }) {
   return { product: productSku(product), ...parseRelatedProducts(page, limit) };
 }
 
-export async function searchFilters({ query }) {
-  if (!query || !String(query).trim()) throw new Error("query is required");
-  const page = await fetchJson(`/search/?text=${encodeURIComponent(query)}&from_global=true`);
-  return parseSearchFilters(page, query);
+/** Compare 2–6 products: details + specs in one response with a characteristic matrix. */
+export async function compareProducts({ products }) {
+  const list = [
+    ...new Set((products || []).map((p) => String(p || "").trim()).filter(Boolean)),
+  ];
+  if (list.length < 2) throw new Error("products requires at least 2 items (sku, url, or slug)");
+  if (list.length > 6) throw new Error("products supports at most 6 items");
+
+  const rows = [];
+  for (const product of list) {
+    const path = productPath(product);
+    const skuHint = productSku(product);
+    try {
+      const [basePage, page2, featuresPage] = await Promise.all([
+        fetchJson(path),
+        fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`),
+        fetchJson(`${path}features/`),
+      ]);
+      const d = parseDetails(basePage, page2);
+      const s = parseSpecs(featuresPage);
+      const short = d.characteristics || {};
+      const full = s.characteristics || {};
+      const characteristics = { ...short, ...full };
+      rows.push({
+        sku: d.sku || skuHint,
+        name: d.name,
+        price: d.price,
+        oldPrice: d.oldPrice,
+        rating: d.rating,
+        reviews: d.reviews,
+        available: d.available,
+        url: d.url,
+        seller: d.seller,
+        location: d.location,
+        fieldCount: Object.keys(characteristics).length,
+        sparse: Object.keys(characteristics).length > 0 && Object.keys(characteristics).length < 8,
+        characteristics,
+        error: null,
+      });
+    } catch (err) {
+      rows.push({
+        sku: skuHint || product,
+        name: null,
+        price: null,
+        characteristics: {},
+        fieldCount: 0,
+        sparse: true,
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  const keys = new Set();
+  for (const r of rows) {
+    for (const k of Object.keys(r.characteristics || {})) keys.add(k);
+  }
+  const matrix = {};
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "ru"))) {
+    matrix[key] = {};
+    for (const r of rows) {
+      matrix[key][r.sku] = r.characteristics?.[key] ?? null;
+    }
+  }
+
+  const onlyIn = {};
+  for (const r of rows) {
+    onlyIn[r.sku] = Object.keys(r.characteristics || {}).filter((k) =>
+      rows.some((other) => other.sku !== r.sku && other.characteristics?.[k] == null)
+    );
+  }
+
+  return {
+    count: rows.length,
+    products: rows,
+    matrix,
+    missingKeysByProduct: onlyIn,
+    note: rows.some((r) => r.sparse)
+      ? "Some listings have sparse specs — null cells are missing on Ozon, not MCP gaps. Prefer another SKU of the same model if needed."
+      : null,
+  };
+}
+
+export async function searchFilters({ query, category } = {}) {
+  if ((!query || !String(query).trim()) && !category) {
+    throw new Error("query or category is required");
+  }
+  let url;
+  if (category) {
+    url = catalogPath(category, "category");
+  } else {
+    url = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
+  }
+  const page = await fetchJson(url);
+  if (category) assertCategorySlug(category, page);
+  return parseSearchFilters(page, query || category);
 }
 
 export async function location() {

@@ -580,11 +580,25 @@ function parseFilterEntry(f) {
     }
   } else if (f.rangeFilter) {
     entry.title = f.rangeFilter.title;
+    entry.type = "range";
     entry.min = f.rangeFilter.minValue ?? null;
     entry.max = f.rangeFilter.maxValue ?? null;
+  } else if (f.multipleRangesFilter) {
+    const mr = f.multipleRangesFilter;
+    entry.title = mr.title || (f.key === "currency_price" ? "Цена" : f.key);
+    entry.type = "range";
+    entry.min = mr.minValue ?? mr.min ?? null;
+    entry.max = mr.maxValue ?? mr.max ?? null;
   } else if (f.radioFilter) {
     entry.title = f.radioFilter.title;
     entry.options = (f.radioFilter.sections?.[0]?.items || f.radioFilter.items || []).map(parseFilterOption);
+  } else if (f.colorFilter) {
+    entry.title = f.colorFilter.title || "Цвет";
+    entry.options = (f.colorFilter.colors || f.colorFilter.items || []).map((c) => ({
+      key: c.key || c.value || null,
+      title: textField(c.title) || c.name || c.text || null,
+      image: c.image || null,
+    }));
   }
   return entry;
 }

@@ -34,7 +34,7 @@ docker build -t ozon-customer-mcp:latest .
 ## 3. Активация
 
 1. Перезапустите MCP-сервер `ozon-customer` в клиенте (Reload / restart).
-2. Должно быть **16 tools**.
+2. Должно быть **17 tools**.
 
 ## 4. Проверка
 

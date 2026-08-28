@@ -1,6 +1,6 @@
 {
   "name": "ozon-customer-mcp",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "MCP server for Ozon customer marketplace: search, product data, sellers, catalogs and delivery city via Camoufox",
   "type": "module",
   "bin": {
@@ -10,8 +10,10 @@
   "scripts": {
     "start": "node src/index.js",
     "test:locations": "python test/locations.test.py",
+    "test:filters": "node scripts/test-filters.js",
     "smoke": "node scripts/smoke-test.js",
-    "smoke:location": "node scripts/smoke-location.js"
+    "smoke:location": "node scripts/smoke-location.js",
+    "smoke:filters": "node scripts/smoke-compare-filters.js"
   },
   "keywords": ["mcp", "ozon", "marketplace", "camoufox", "customer"],
   "license": "MIT",
