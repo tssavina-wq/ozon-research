@@ -81,9 +81,21 @@ function call(cmd, payload = {}) {
 /**
  * Fetch a composer-api page as parsed JSON for the given site path.
  * Delegates to Camoufox in python/browser_service.py.
+ * Retries once if the Python process died mid-call (Connection closed / EPIPE).
  */
-export async function fetchJson(path, { retries = 1 } = {}) {
-  return call("fetch", { path, retries });
+export async function fetchJson(path, { retries = 2 } = {}) {
+  try {
+    return await call("fetch", { path, retries });
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (/exited|EPIPE|not writable|closed|destroyed/i.test(msg)) {
+      log("browser bridge lost, restarting…");
+      proc = null;
+      rl = null;
+      return call("fetch", { path, retries });
+    }
+    throw err;
+  }
 }
 
 export async function getLocation() {

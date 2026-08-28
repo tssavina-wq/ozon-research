@@ -192,6 +192,125 @@ export function parseSearch(page, limit = 12) {
   };
 }
 
+/** Strip color/finish words so black/white SKUs of the same model share a key. */
+// JS \w is ASCII-only. Also avoid stems like бел* matching «беспроводная».
+const CYR = "а-яё";
+const COLOR_END = `(?:ый|ая|ое|ые|ую|ой|ым|ом|ой|ое)?`;
+const COLOR_TOKEN = new RegExp(
+  `(^|[^a-z0-9${CYR}])(` +
+    [
+      `чёрн${COLOR_END}`,
+      `черн${COLOR_END}`,
+      `бел${COLOR_END}`,
+      `сер${COLOR_END}`,
+      `красн${COLOR_END}`,
+      `син${COLOR_END}`,
+      `зелён${COLOR_END}`,
+      `зелен${COLOR_END}`,
+      `розов${COLOR_END}`,
+      `фиолетов${COLOR_END}`,
+      `жёлт${COLOR_END}`,
+      `желт${COLOR_END}`,
+      `золот${COLOR_END}`,
+      `серебрист${COLOR_END}`,
+      `серебр${COLOR_END}`,
+      `оранж${COLOR_END}`,
+      `коричнев${COLOR_END}`,
+      `бежев${COLOR_END}`,
+      `тёмно[\\s-]?сер${COLOR_END}`,
+      `темно[\\s-]?сер${COLOR_END}`,
+      `тёмн${COLOR_END}`,
+      `темн${COLOR_END}`,
+      `светл${COLOR_END}`,
+      `матов${COLOR_END}`,
+      `глянцев${COLOR_END}`,
+      "black",
+      "white",
+      "gray",
+      "grey",
+      "red",
+      "blue",
+      "green",
+      "pink",
+      "purple",
+      "yellow",
+      "gold",
+      "silver",
+      "orange",
+      "brown",
+      "beige",
+      "dark",
+      "light",
+      "matte",
+      "glossy",
+    ].join("|") +
+    `)(?=[^a-z0-9${CYR}]|$)`,
+  "gi"
+);
+
+export function modelKey(item) {
+  const brand = String(item?.brand || "")
+    .toLowerCase()
+    .replace(/бренд проверен/g, "")
+    .trim();
+  let name = String(item?.name || "")
+    .toLowerCase()
+    .replace(COLOR_TOKEN, "$1")
+    .replace(new RegExp(`\\b\\d+\\s*(gb|гб|tb|тб|мм|cm|см|dpi)\\b`, "gi"), " ")
+    .replace(new RegExp(`[^a-z0-9${CYR}]+`, "gi"), " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (brand && brand !== "null" && !name.includes(brand.replace(/\s+/g, " "))) {
+    name = `${brand} ${name}`.trim();
+  }
+  return name || String(item?.sku || "");
+}
+
+function betterSearchItem(a, b) {
+  const ar = a.reviews ?? -1;
+  const br = b.reviews ?? -1;
+  if (ar !== br) return ar > br ? a : b;
+  const arate = a.rating ?? -1;
+  const brate = b.rating ?? -1;
+  if (arate !== brate) return arate > brate ? a : b;
+  const ap = a.price ?? Infinity;
+  const bp = b.price ?? Infinity;
+  return ap <= bp ? a : b;
+}
+
+/** Collapse color/size variants of the same model into one row. */
+export function dedupeSearchItems(items, { enabled = true } = {}) {
+  if (!enabled || !items?.length) return items || [];
+  const groups = new Map();
+  for (const it of items) {
+    const key = modelKey(it);
+    const variant = { sku: it.sku, name: it.name, price: it.price, url: it.url };
+    const prev = groups.get(key);
+    if (!prev) {
+      groups.set(key, {
+        ...it,
+        modelKey: key,
+        variants: [variant],
+      });
+      continue;
+    }
+    prev.variants.push(variant);
+    const winner = betterSearchItem(prev, it);
+    if (winner === it) {
+      groups.set(key, {
+        ...it,
+        modelKey: key,
+        variants: prev.variants,
+      });
+    }
+  }
+  return [...groups.values()].map((g) => ({
+    ...g,
+    variantCount: g.variants.length,
+    variantSkus: g.variants.map((v) => v.sku),
+  }));
+}
+
 /** Extract plain text from Ozon DS text nodes. */
 function textField(obj) {
   if (!obj) return null;
@@ -246,15 +365,16 @@ function parseShortCharacteristics(page) {
   return out;
 }
 
-/** product's own rating + review count, from webSingleProductScore: "4.9 • 819 отзывов" */
+/** product's own rating + review count, from webSingleProductScore: "4.9 • 819 отзывов" / "5 • 387 отзывов" */
 function parseProductScore(page) {
   const w = widget(page, "webSingleProductScore") || widget(page, "webReviewProductScore");
-  const text = w?.text || JSON.stringify(w || {});
+  const text = String(w?.text || "");
   let rating = null;
   let reviews = null;
-  const rm = text.match(/(\d[.,]\d)/);
+  // Integer ratings (5) must match too — old /(\d[.,]\d)/ missed them.
+  const rm = text.match(/^(\d+(?:[.,]\d+)?)/);
   if (rm) rating = parseFloat(rm[1].replace(",", "."));
-  const cm = text.match(/(\d[\d\s]*)\s*отзыв/);
+  const cm = text.match(/(\d[\d\s\u00a0]*)\s*отзыв/);
   if (cm) reviews = priceToNumber(cm[1]);
   return { rating, reviews };
 }
@@ -480,10 +600,12 @@ export function parseSpecs(page) {
   }
   const keys = Object.keys(characteristics);
   const totalCount = Number(w?.totalCount) || keys.length;
+  const sparse = keys.length > 0 && keys.length < 8;
   return {
     totalCount,
     fieldCount: keys.length,
-    sparse: keys.length > 0 && keys.length < 8,
+    sparse,
+    specsIncomplete: sparse || keys.length === 0,
     productTitle: w?.productTitle || null,
     characteristics,
     note:
@@ -630,4 +752,12 @@ export function parseSearchFilters(page, query) {
   return { query, filters, activeFilters, sortOptions };
 }
 
-export const _internal = { priceToNumber, cleanUrl, skuFromUrl, widget, parseSearchItem };
+export const _internal = {
+  priceToNumber,
+  cleanUrl,
+  skuFromUrl,
+  widget,
+  parseSearchItem,
+  parseProductScore,
+  modelKey,
+};

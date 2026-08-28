@@ -14,6 +14,7 @@ import {
   parseBrandCatalog,
   parseRelatedProducts,
   parseSearchFilters,
+  dedupeSearchItems,
 } from "./parse.js";
 import {
   filtersNeedResolve,
@@ -27,6 +28,8 @@ import { _internal } from "./parse.js";
 const { skuFromUrl } = _internal;
 
 const SORT_MAP = {
+  // IMPORTANT: Ozon `sorting=popular` returns an EMPTY tile grid for many queries.
+  // Default popularity is "no sorting param".
   popular: "",
   price: "price",
   price_desc: "price_desc",
@@ -275,6 +278,18 @@ async function buildCatalogUrl({
   return { url, category: cat || null, appliedFilters: applied };
 }
 
+function finalizeItems(parsed, { limit = 12, dedupeVariants = true } = {}) {
+  let items = parsed.items || [];
+  if (dedupeVariants) items = dedupeSearchItems(items);
+  items = items.slice(0, limit);
+  return {
+    items,
+    count: items.length,
+    sponsoredOnly: parsed.sponsoredOnly || false,
+    dedupeVariants: Boolean(dedupeVariants),
+  };
+}
+
 export async function search({
   query,
   category,
@@ -283,34 +298,70 @@ export async function search({
   priceMax,
   filters,
   limit = 12,
+  dedupeVariants = true,
 } = {}) {
   if ((!query || !String(query).trim()) && !category && !(filters && filters.category)) {
     throw new Error("query or category is required");
   }
-  const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
-    query: query ? String(query).trim() : undefined,
+  const q = query ? String(query).trim() : undefined;
+  const fetchLimit = dedupeVariants ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+
+  const built = await buildCatalogUrl({
+    query: q,
     category,
     sort,
     priceMin,
     priceMax,
     filters,
   });
-  const page = await fetchJson(url);
-  if (resolvedCategory) assertCategorySlug(resolvedCategory, page);
+  let page = await fetchJson(built.url);
+  if (built.category) assertCategorySlug(built.category, page);
 
-  const parsed = parseSearch(page, limit);
+  let sortUsed = sort;
+  let parsed = parseSearch(page, fetchLimit);
+  let note = null;
+
+  // Ozon "popular" (no sorting / ads shelf) is often empty or ads-only with price filters.
+  // Prefer organic rating results instead of making the agent guess.
+  if (sort === "popular" && (parsed.count === 0 || parsed.sponsoredOnly)) {
+    const alt = await buildCatalogUrl({
+      query: q,
+      category: built.category || category,
+      sort: "rating",
+      priceMin,
+      priceMax,
+      filters: built.appliedFilters,
+    });
+    const altPage = await fetchJson(alt.url);
+    const altParsed = parseSearch(altPage, fetchLimit);
+    if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
+      page = altPage;
+      parsed = altParsed;
+      sortUsed = "rating";
+      note =
+        "sort=popular returned empty or ads-only results with these filters; automatically used sort=rating";
+    }
+  }
+
+  const finalized = finalizeItems(parsed, { limit, dedupeVariants });
   const out = {
-    query: query ? String(query).trim() : null,
-    category: resolvedCategory,
-    sort,
-    filters: appliedFilters && Object.keys(appliedFilters).length ? appliedFilters : undefined,
-    count: parsed.count,
-    items: parsed.items,
+    query: q || null,
+    category: built.category,
+    sort: sortUsed,
+    filters:
+      built.appliedFilters && Object.keys(built.appliedFilters).length
+        ? built.appliedFilters
+        : undefined,
+    count: finalized.count,
+    items: finalized.items,
+    dedupeVariants: finalized.dedupeVariants,
   };
-  if (parsed.sponsoredOnly) out.sponsoredOnly = true;
+  if (sortUsed !== sort) out.requestedSort = sort;
+  if (finalized.sponsoredOnly) out.sponsoredOnly = true;
+  if (note) out.note = note;
 
-  if (parsed.count === 0) {
-    const filt = parseSearchFilters(page, query || "");
+  if (finalized.count === 0) {
+    const filt = parseSearchFilters(page, q || "");
     const cat = filt.filters?.find((f) => f.key === "category");
     const active = (cat?.options || []).find((o) => o.active && /\/category\//.test(o.url || ""));
     const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1];
@@ -387,7 +438,9 @@ export async function categoryBrowse({
   priceMax,
   filters,
   limit = 12,
+  dedupeVariants = true,
 } = {}) {
+  const fetchLimit = dedupeVariants ? Math.min(36, Math.max(limit * 3, limit)) : limit;
   const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
     category,
     sort,
@@ -395,11 +448,44 @@ export async function categoryBrowse({
     priceMax,
     filters,
   });
-  const page = await fetchJson(url);
+  let page = await fetchJson(url);
   assertCategorySlug(resolvedCategory || category, page);
-  const result = parseCategoryBrowse(page, limit);
-  if (appliedFilters && Object.keys(appliedFilters).length) result.filters = appliedFilters;
-  return result;
+  let sortUsed = sort;
+  let parsed = parseSearch(page, fetchLimit);
+  let note = null;
+
+  if (sort === "popular" && (parsed.count === 0 || parsed.sponsoredOnly)) {
+    const alt = await buildCatalogUrl({
+      category: resolvedCategory || category,
+      sort: "rating",
+      priceMin,
+      priceMax,
+      filters: appliedFilters,
+    });
+    const altPage = await fetchJson(alt.url);
+    const altParsed = parseSearch(altPage, fetchLimit);
+    if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
+      page = altPage;
+      parsed = altParsed;
+      sortUsed = "rating";
+      note =
+        "sort=popular returned empty or ads-only results; automatically used sort=rating";
+    }
+  }
+
+  const finalized = finalizeItems(parsed, { limit, dedupeVariants });
+  const meta = parseCategoryBrowse(page, fetchLimit);
+  return {
+    ...meta,
+    sort: sortUsed,
+    requestedSort: sortUsed !== sort ? sort : undefined,
+    note: note || undefined,
+    filters: appliedFilters && Object.keys(appliedFilters).length ? appliedFilters : undefined,
+    count: finalized.count,
+    items: finalized.items,
+    dedupeVariants: finalized.dedupeVariants,
+    sponsoredOnly: finalized.sponsoredOnly || undefined,
+  };
 }
 
 export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax, filters, limit = 12 }) {
@@ -460,6 +546,8 @@ export async function compareProducts({ products }) {
         location: d.location,
         fieldCount: Object.keys(characteristics).length,
         sparse: Object.keys(characteristics).length > 0 && Object.keys(characteristics).length < 8,
+        specsIncomplete:
+          Object.keys(characteristics).length === 0 || Object.keys(characteristics).length < 8,
         characteristics,
         error: null,
       });

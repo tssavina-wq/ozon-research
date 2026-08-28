@@ -103,15 +103,19 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
       return { content: [{ type: "text", text }] };
     } catch (err) {
       log(`${label} error:`, err?.message);
+      let msg = err?.message || String(err);
+      if (/exited|EPIPE|closed|not writable|Connection closed/i.test(msg)) {
+        msg += " — temporary session drop; retry the same tool call.";
+      }
       return {
-        content: [{ type: "text", text: `Error: ${err?.message || String(err)}` }],
+        content: [{ type: "text", text: `Error: ${msg}` }],
         isError: true,
       };
     }
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.4.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.4.1" });
 
 server.registerTool(
   "ozon_search",
@@ -122,7 +126,8 @@ server.registerTool(
       "by name or keywords. Returns sku, name, price (RUB number), oldPrice, discount, rating, review count, brand, " +
       "image URL and clean product link. Use priceMin/priceMax for budget and filters{} for facets " +
       "(brand, delivery, mouseconnection, … — keys from ozon_search_filters). " +
-      "Optional category pins results to a category slug. " +
+      "Optional category pins results to a category slug. Color variants are deduped by default " +
+      "(modelKey + variantSkus). If sort=popular is empty/ads-only, automatically retries with rating. " +
       "If count is 0, read hint/suggestedCategory. " +
       "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
@@ -140,6 +145,10 @@ server.registerTool(
       priceMin: z.number().int().nonnegative().optional().describe("Minimum price in rubles"),
       priceMax: z.number().int().nonnegative().optional().describe("Maximum price in rubles"),
       filters: filtersSchema,
+      dedupeVariants: z
+        .boolean()
+        .optional()
+        .describe("Collapse color variants of the same model (default true). Set false to keep every SKU."),
       limit: limitSchema(36, 12).describe("How many products to return (1–36)"),
     },
     annotations: readOnly,
@@ -237,7 +246,7 @@ server.registerTool(
     title: "Get full Ozon product specifications",
     description:
       "Technical characteristics from the listing (fieldCount varies — many cards are sparse with <8 fields). " +
-      "When sparse=true, do not invent hardware numbers; use ozon_product_questions or another SKU of the same model. " +
+      "When sparse/specsIncomplete=true, do not invent hardware numbers; use ozon_product_questions or another SKU of the same model. " +
       "More complete than ozon_product_details.characteristics when the seller filled the table.",
     inputSchema: { product: productId },
     annotations: readOnly,
@@ -296,6 +305,10 @@ server.registerTool(
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
       filters: filtersSchema,
+      dedupeVariants: z
+        .boolean()
+        .optional()
+        .describe("Collapse color variants of the same model (default true)"),
       limit: limitSchema(36, 12),
     },
     annotations: readOnly,
