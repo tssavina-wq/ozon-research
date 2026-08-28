@@ -25,7 +25,7 @@ import {
 } from "./ozon.js";
 import { shutdown } from "./browser.js";
 
-const log = (...a) => console.error("[ozon-mcp]", ...a);
+const log = (...a) => console.error("[ozon-customer-mcp]", ...a);
 const TOOL_TIMEOUT_MS = 55000;
 const MAX_TEXT = 60000;
 const EXIT_IDLE_MS = Number(process.env.OZON_EXIT_IDLE_MS || 10 * 60 * 1000);
@@ -86,7 +86,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-mcp-pro", version: "1.2.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.3.0" });
 
 server.registerTool(
   "ozon_search",
@@ -96,6 +96,8 @@ server.registerTool(
       "Entry point for product discovery on ozon.ru. Use when the user asks to find, look up, or compare products " +
       "by name or keywords. Returns sku, name, price (RUB number), oldPrice, discount, rating, review count, brand, " +
       "image URL and clean product link. Use priceMin/priceMax for budget filters. " +
+      "If count is 0, read hint/suggestedCategory and call ozon_category_browse or ozon_search_filters — " +
+      "broad queries often redirect to a category. " +
       "Next step: ozon_product_details(sku) for full card, or ozon_product_offers(sku) to compare sellers.",
     inputSchema: {
       query: z.string().min(1).describe('Keywords, e.g. "Steam Deck OLED", "iphone 15", "наушники sony"'),
@@ -198,9 +200,9 @@ server.registerTool(
   {
     title: "Get full Ozon product specifications",
     description:
-      "Complete technical characteristics table (~15–30 fields). Use for detailed comparison between models " +
-      "or when user asks about specific specs (CPU, RAM, screen, interfaces). " +
-      "More complete than ozon_product_details.characteristics. Requires product sku or URL.",
+      "Technical characteristics from the listing (fieldCount varies — many cards are sparse with <8 fields). " +
+      "When sparse=true, do not invent hardware numbers; use ozon_product_questions or another SKU of the same model. " +
+      "More complete than ozon_product_details.characteristics when the seller filled the table.",
     inputSchema: { product: productId },
     annotations: readOnly,
   },
@@ -249,9 +251,11 @@ server.registerTool(
     description:
       "Products inside a category without text search. Use for 'show smartphones under 30k' via category + priceMax, " +
       "or browsing a department. Returns products, breadcrumbs, top brands in category. " +
-      "Category example: 'smartfony-15502' or full /category/... URL from ozon.ru.",
+      "IMPORTANT: Ozon matches the numeric id only — a hallucinated slug like myshi-15721 can silently open " +
+      "videokarty-15721. Always copy the slug from ozon_search_filters (active category URL) or a real ozon.ru link. " +
+      "Mismatch of text prefix vs real category → error.",
     inputSchema: {
-      category: catalogId("Category slug like smartfony-15502, or full category URL"),
+      category: catalogId("Exact category slug from filters/URL, e.g. besprovodnye-myshi-31940 — not a guessed name-id"),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),

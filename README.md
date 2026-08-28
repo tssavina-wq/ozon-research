@@ -1,6 +1,8 @@
-# ozon-mcp-pro
+# ozon-customer-mcp
 
-MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru): поиск, карточки товаров, отзывы, Q&A, сравнение продавцов, каталоги и **город доставки** через [Model Context Protocol](https://modelcontextprotocol.io).
+MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru) (сторона покупателя): поиск, карточки товаров, отзывы, Q&A, сравнение продавцов, каталоги и **город доставки** через [Model Context Protocol](https://modelcontextprotocol.io).
+
+Репозиторий: `ozon-customer-mcp`. Имя MCP-сервера и Docker-образа совпадает.
 
 Работает в Cursor, Claude Desktop, VS Code и других MCP-клиентах.
 
@@ -49,14 +51,15 @@ ozon_product_offers({ product: sku })  → даты для выбранного 
 ### Идентификаторы
 
 - **Товар:** SKU, URL `https://www.ozon.ru/product/...` или slug  
-- **Продавец / категория / бренд:** slug, numeric id или полный URL
+- **Продавец / категория / бренд:** slug, numeric id или полный URL  
+- **Категория:** только реальный slug из `ozon_search_filters` или ozon.ru — Ozon смотрит на numeric id, префикс вроде `myshi-15721` может открыть чужую категорию
 
 ## Быстрый старт
 
 ```bash
-git clone <this-repo>
-cd ozon-mcp-pro
-docker build -t ozon-mcp-pro:latest .
+git clone https://github.com/Raleose/ozon-customer-mcp.git
+cd ozon-customer-mcp
+docker build -t ozon-customer-mcp:latest .
 ```
 
 ### MCP-конфиг (Docker)
@@ -66,12 +69,12 @@ docker build -t ozon-mcp-pro:latest .
 ```json
 {
   "mcpServers": {
-    "ozon": {
+    "ozon-customer": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm", "--init", "--stop-timeout=10", "--shm-size=1g",
-        "--label", "ozon-mcp-pro=1",
-        "ozon-mcp-pro:latest"
+        "--label", "ozon-customer-mcp=1",
+        "ozon-customer-mcp:latest"
       ]
     }
   }
@@ -139,8 +142,9 @@ node scripts/smoke-location.js    # live: search_cities + set_city
 | Antibot / Captcha | Другой IP или RU-прокси |
 | HTTP 403 | Сессия перезапустится сама |
 | Контейнеры не удаляются | Пересоберите образ, проверьте `--stop-timeout=10` |
-| Мало tools в клиенте | Reload MCP / пересоберите `ozon-mcp-pro:latest` |
+| Мало tools в клиенте | Reload MCP / пересоберите `ozon-customer-mcp:latest` |
 | Город не тот | `ozon_search_cities` → `ozon_set_city` |
+| Пустой search | Смотри `hint` / `suggestedCategory` или `ozon_search_filters` |
 
 ## Лицензия
 

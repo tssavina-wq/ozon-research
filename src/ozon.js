@@ -66,20 +66,55 @@ function looksLikeBrandId(value) {
   return /-\d+\/?$/.test(String(value || "").trim()) || /\/brand\/[^/]+-\d+/i.test(String(value || ""));
 }
 
-function extractBrandSlugFromSearch(page, query) {
-  const q = String(query || "")
+function brandTokens(query) {
+  return String(query || "")
     .trim()
     .toLowerCase()
     .replace(/-\d+$/, "")
-    .replace(/[^a-z0-9а-яё_-]+/gi, "");
-  if (!q) return null;
+    .split(/[^a-z0-9а-яё]+/i)
+    .filter(Boolean);
+}
+
+function stemMatchesBrand(stem, tokens) {
+  if (!stem || !tokens.length) return false;
+  const flat = stem.replace(/-/g, "").toLowerCase();
+  const joined = tokens.join("");
+  const dashed = tokens.join("-");
+  return (
+    stem.toLowerCase() === dashed ||
+    flat === joined ||
+    (tokens.length > 1 && tokens.every((t) => stem.toLowerCase().includes(t)))
+  );
+}
+
+function extractBrandSlugFromSearch(page, query) {
+  const tokens = brandTokens(query);
+  if (!tokens.length) return null;
   const blob = JSON.stringify(page?.widgetStates || {});
-  // /brand/baseus-168785571/ or /category/.../baseus-168785571/
-  const re = new RegExp(`(?:/brand/|/category/[^/]+/)(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\w-]*-\\d+)`, "i");
-  const m = blob.match(re);
-  if (m) return m[1];
-  const loose = blob.match(/\/brand\/([a-z0-9-]+-\d+)\//i);
-  return loose ? loose[1] : null;
+  const brandPaths = [...blob.matchAll(/\/brand\/([a-z0-9-]+-\d+)\//gi)].map((m) => m[1]);
+  const categoryBrandPaths = [...blob.matchAll(/\/category\/[^"'\\\s]+\/([a-z0-9-]+-\d+)\//gi)].map(
+    (m) => m[1]
+  );
+  const candidates = [...new Set([...brandPaths, ...categoryBrandPaths])];
+  for (const c of candidates) {
+    const stem = c.replace(/-\d+$/, "");
+    if (stemMatchesBrand(stem, tokens) && brandPaths.includes(c)) return c;
+  }
+  for (const c of candidates) {
+    const stem = c.replace(/-\d+$/, "");
+    if (stemMatchesBrand(stem, tokens)) return c;
+  }
+  // Brand filter id → guess slug-id (attack-shark-100867541)
+  const filters = parseSearchFilters(page, query);
+  const brandFilter = filters.filters?.find((f) => f.key === "brand");
+  const opt = (brandFilter?.options || []).find((o) => {
+    const t = brandTokens(o.title);
+    return t.join("") === tokens.join("") || stemMatchesBrand(t.join("-"), tokens);
+  });
+  if (opt?.key && /^\d+$/.test(String(opt.key))) {
+    return `${tokens.join("-")}-${opt.key}`;
+  }
+  return brandPaths[0] || null;
 }
 
 async function resolveBrandPath(brand) {
@@ -88,12 +123,21 @@ async function resolveBrandPath(brand) {
   if (/^https?:\/\//.test(raw) || looksLikeBrandId(raw) || raw.startsWith("/brand/")) {
     return catalogPath(raw, "brand");
   }
-  const probe = await fetchJson(catalogPath(raw, "brand"));
-  const pageType = probe?.pageInfo?.pageTypeTracking || "";
-  const organic = parseSearch(probe, 3).count;
-  if ((pageType === "brand/landing" || pageType === "brand_customized") && organic > 0) {
-    return catalogPath(raw, "brand");
+
+  const hyphenated = brandTokens(raw).join("-");
+  for (const candidate of [...new Set([raw, hyphenated].filter(Boolean))]) {
+    try {
+      const probe = await fetchJson(catalogPath(candidate, "brand"));
+      const pageType = probe?.pageInfo?.pageTypeTracking || "";
+      const organic = parseSearch(probe, 3).count;
+      if ((pageType === "brand/landing" || pageType === "brand_customized") && organic > 0) {
+        return catalogPath(candidate, "brand");
+      }
+    } catch (err) {
+      if (!/HTTP 404/i.test(err?.message || "")) throw err;
+    }
   }
+
   const searchPage = await fetchJson(`/search/?text=${encodeURIComponent(raw)}&from_global=true`);
   const slug = extractBrandSlugFromSearch(searchPage, raw);
   if (!slug) {
@@ -101,7 +145,61 @@ async function resolveBrandPath(brand) {
       `could not resolve brand "${raw}"; pass slug with id like "apple-26303000" or a /brand/... URL`
     );
   }
-  return `/brand/${slug}/`;
+  // Verify guessed slug-id actually exists (filter-based guesses can 404)
+  try {
+    await fetchJson(`/brand/${slug}/`);
+    return `/brand/${slug}/`;
+  } catch (err) {
+    if (!/HTTP 404/i.test(err?.message || "")) throw err;
+    throw new Error(
+      `could not resolve brand "${raw}" (tried /brand/${slug}/); pass slug with id like "apple-26303000"`
+    );
+  }
+}
+
+/** Ozon resolves /category/wrongstem-15721/ by numeric id only — validate stem vs page. */
+function categoryStemId(value) {
+  const m = String(value || "").match(/([a-z0-9-]+)-(\d+)\/?$/i);
+  if (!m) return null;
+  return { stem: m[1].toLowerCase(), id: m[2] };
+}
+
+function canonicalCategorySlug(page) {
+  const brandsW = page?.widgetStates
+    ? Object.entries(page.widgetStates).find(([k]) => k.startsWith("categoryBrandList"))
+    : null;
+  if (brandsW) {
+    try {
+      const data = typeof brandsW[1] === "string" ? JSON.parse(brandsW[1]) : brandsW[1];
+      for (const b of data?.brands || []) {
+        const m = String(b.action?.link || "").match(/\/category\/([a-z0-9-]+-\d+)\//i);
+        if (m) return m[1];
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const blob = JSON.stringify(page?.widgetStates || {});
+  const m = blob.match(/\/category\/([a-z0-9-]+-\d+)\//i);
+  return m ? m[1] : null;
+}
+
+function assertCategorySlug(categoryInput, page) {
+  const requested = categoryStemId(catalogPath(categoryInput, "category"));
+  if (!requested) return;
+  const canonical = canonicalCategorySlug(page);
+  const got = categoryStemId(canonical);
+  if (!got || got.id !== requested.id || got.stem === requested.stem) return;
+  const title = String(page?.seo?.title || "")
+    .split(/[-–|]/)[0]
+    .trim();
+  throw new Error(
+    `category slug mismatch: "${requested.stem}-${requested.id}" is not a real category — ` +
+      `Ozon id ${requested.id} is "${got.stem}-${got.id}"` +
+      `${title ? ` ("${title}")` : ""}. ` +
+      `Ozon ignores the text prefix and uses the numeric id. ` +
+      `Get the real slug from ozon_search_filters (active category URL), e.g. "${got.stem}-${got.id}".`
+  );
 }
 
 function appendCatalogParams(url, { sort = "popular", priceMin, priceMax } = {}) {
@@ -124,8 +222,30 @@ export async function search({ query, sort = "popular", priceMin, priceMax, limi
   let url = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
   url = appendCatalogParams(url, { sort, priceMin, priceMax });
   const page = await fetchJson(url);
-  const { items } = parseSearch(page, limit);
-  return { query, sort, count: items.length, items };
+  const parsed = parseSearch(page, limit);
+  const out = {
+    query,
+    sort,
+    count: parsed.count,
+    items: parsed.items,
+  };
+  if (parsed.sponsoredOnly) out.sponsoredOnly = true;
+
+  if (parsed.count === 0) {
+    const filters = parseSearchFilters(page, query);
+    const cat = filters.filters?.find((f) => f.key === "category");
+    const active = (cat?.options || []).find((o) => o.active && /\/category\//.test(o.url || ""));
+    const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1];
+    if (slug) {
+      out.hint =
+        `No products parsed for this query; Ozon maps it to category "${slug}". ` +
+        `Try ozon_category_browse({ category: "${slug}" }) or ozon_search_filters.`;
+      out.suggestedCategory = slug;
+    } else {
+      out.hint = "No products found. Try ozon_search_filters to discover categories/brands, or a more specific query.";
+    }
+  }
+  return out;
 }
 
 export async function details({ product }) {
@@ -184,6 +304,7 @@ export async function sellerCatalog({ seller, sort = "popular", priceMin, priceM
 export async function categoryBrowse({ category, sort = "popular", priceMin, priceMax, limit = 12 }) {
   const path = appendCatalogParams(catalogPath(category, "category"), { sort, priceMin, priceMax });
   const page = await fetchJson(path);
+  assertCategorySlug(category, page);
   return parseCategoryBrowse(page, limit);
 }
 

@@ -179,9 +179,17 @@ function pickTileGrid(page) {
 
 export function parseSearch(page, limit = 12) {
   const grid = pickTileGrid(page);
-  const raw = (grid?.items || []).filter((it) => !isAdTile(it));
+  const all = grid?.items || [];
+  const organic = all.filter((it) => !isAdTile(it));
+  // Popular queries often land on a category shelf where every tile is advertLite —
+  // filtering them all would return an empty list while the page is full of products.
+  const raw = organic.length ? organic : all;
   const items = raw.map(parseSearchItem).filter(Boolean).slice(0, limit);
-  return { count: items.length, items };
+  return {
+    count: items.length,
+    items,
+    sponsoredOnly: Boolean(organic.length === 0 && items.length > 0),
+  };
 }
 
 /** Extract plain text from Ozon DS text nodes. */
@@ -470,10 +478,18 @@ export function parseSpecs(page) {
       if (name && values.length) characteristics[name] = values.join(", ");
     }
   }
+  const keys = Object.keys(characteristics);
+  const totalCount = Number(w?.totalCount) || keys.length;
   return {
-    totalCount: Number(w?.totalCount) || Object.keys(characteristics).length,
+    totalCount,
+    fieldCount: keys.length,
+    sparse: keys.length > 0 && keys.length < 8,
     productTitle: w?.productTitle || null,
     characteristics,
+    note:
+      keys.length < 8
+        ? "Seller left few specs on this listing; cross-check ozon_product_questions / title / other SKUs of the same model."
+        : null,
   };
 }
 

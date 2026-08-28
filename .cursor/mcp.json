@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ozon": {
+    "ozon-customer": {
       "command": "docker",
       "args": [
         "run",
@@ -9,8 +9,8 @@
         "--init",
         "--stop-timeout=10",
         "--shm-size=1g",
-        "--label", "ozon-mcp-pro=1",
-        "ozon-mcp-pro:latest"
+        "--label", "ozon-customer-mcp=1",
+        "ozon-customer-mcp:latest"
       ]
     }
   }

@@ -3,7 +3,7 @@
 ## 1. Собрать образ
 
 ```bash
-docker build -t ozon-mcp-pro:latest .
+docker build -t ozon-customer-mcp:latest .
 ```
 
 ## 2. Конфиг клиента
@@ -19,12 +19,12 @@ docker build -t ozon-mcp-pro:latest .
 ```json
 {
   "mcpServers": {
-    "ozon": {
+    "ozon-customer": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm", "--init", "--stop-timeout=10", "--shm-size=1g",
-        "--label", "ozon-mcp-pro=1",
-        "ozon-mcp-pro:latest"
+        "--label", "ozon-customer-mcp=1",
+        "ozon-customer-mcp:latest"
       ]
     }
   }
@@ -33,7 +33,7 @@ docker build -t ozon-mcp-pro:latest .
 
 ## 3. Активация
 
-1. Перезапустите MCP-сервер `ozon` в клиенте (Reload / restart).
+1. Перезапустите MCP-сервер `ozon-customer` в клиенте (Reload / restart).
 2. Должно быть **16 tools**.
 
 ## 4. Проверка

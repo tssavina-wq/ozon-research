@@ -1,4 +1,4 @@
-# Ozon MCP Pro — Node MCP + Python Camoufox (anti-detect browser).
+# Ozon Customer MCP — Node MCP + Python Camoufox (anti-detect browser).
 FROM python:3.12-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
