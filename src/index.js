@@ -37,8 +37,7 @@ const productId = z
     'Product identifier: numeric SKU ("1850364818"), full https://www.ozon.ru/product/... URL, or slug path'
   );
 
-const catalogId = (hint) =>
-  z.string().min(1).describe(`${hint}. Examples: slug "dubaidutyfree", id "1463603", or full ozon.ru URL`);
+const catalogId = (hint) => z.string().min(1).describe(hint);
 
 const sortSchema = z
   .enum(["popular", "price", "price_desc", "rating", "new", "discount"])
@@ -217,7 +216,7 @@ server.registerTool(
       "Returns: shop name, logo, badges (Premium etc.), info modal link. " +
       "Seller id examples: slug 'dubaidutyfree', numeric id, or seller URL from product card.",
     inputSchema: {
-      seller: catalogId("Seller slug, numeric id, or https://www.ozon.ru/seller/... URL"),
+      seller: catalogId('Seller slug "dubaidutyfree", numeric id, or https://www.ozon.ru/seller/... URL'),
     },
     annotations: readOnly,
   },
@@ -268,10 +267,11 @@ server.registerTool(
   {
     title: "Browse Ozon brand store",
     description:
-      "Official brand storefront on Ozon (Apple, Samsung, Valve, etc.). Use when user asks for all products of a brand. " +
-      "Brand example: 'apple-26303000' or /brand/... URL.",
+      "Official brand storefront on Ozon (Apple, Samsung, Baseus, etc.). " +
+      "Accepts brand name (\"Baseus\"), slug-id (\"apple-26303000\"), or /brand/... URL. " +
+      "Plain names are resolved via Ozon search. Returns brand products (ads filtered out).",
     inputSchema: {
-      brand: catalogId("Brand slug like apple-26303000, or full brand URL"),
+      brand: catalogId('Brand name "Baseus", slug-id "apple-26303000", or https://www.ozon.ru/brand/... URL'),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),

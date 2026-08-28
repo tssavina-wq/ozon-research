@@ -144,9 +144,42 @@ function parseSearchItem(it) {
   };
 }
 
+/** True if tile looks like paid placement (Ozon puts advertLite in tracking). */
+function isAdTile(it) {
+  const customs = [];
+  const c1 = it?.trackingInfo?.click?.custom;
+  if (c1) customs.push(c1);
+  for (const btn of it?.topRightButtons || []) {
+    const c = btn?.favoriteProductMoleculeV2?.trackingInfo?.click?.custom;
+    if (c) customs.push(c);
+  }
+  return customs.some((c) => c.advertLite || c.advId || c.advert);
+}
+
+/** Pick the best product grid: catalog page grids over ad carousels. */
+function pickTileGrid(page) {
+  const grids = widgets(page, "tileGridDesktop");
+  if (!grids.length) return null;
+  let best = null;
+  let bestScore = -Infinity;
+  for (const g of grids) {
+    const items = g.items || [];
+    if (!items.length) continue;
+    const ads = items.filter(isAdTile).length;
+    const organic = items.length - ads;
+    // Real catalog grids often expose `page`; ad shelves are almost all advertLite
+    const score = (g.page != null ? 1000 : 0) + organic * 10 - ads * 20;
+    if (score > bestScore) {
+      bestScore = score;
+      best = g;
+    }
+  }
+  return best || grids[0];
+}
+
 export function parseSearch(page, limit = 12) {
-  const grid = widget(page, "tileGridDesktop");
-  const raw = grid?.items || [];
+  const grid = pickTileGrid(page);
+  const raw = (grid?.items || []).filter((it) => !isAdTile(it));
   const items = raw.map(parseSearchItem).filter(Boolean).slice(0, limit);
   return { count: items.length, items };
 }
@@ -483,9 +516,12 @@ export function parseCategoryBrowse(page, limit = 12) {
 
 export function parseBrandCatalog(page, limit = 12) {
   const brandW = widget(page, "sellerTransparency");
-  const catalog = parseCatalogMeta(page, limit, {
-    brand: brandW?.title?.text || null,
-  });
+  const seoTitle = page?.seo?.title || null;
+  const brandName =
+    brandW?.title?.text ||
+    (typeof seoTitle === "string" ? seoTitle.split(/купить|–|-/)[0].trim() : null) ||
+    null;
+  const catalog = parseCatalogMeta(page, limit, { brand: brandName });
   return catalog;
 }
 

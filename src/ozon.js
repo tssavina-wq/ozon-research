@@ -61,6 +61,49 @@ function catalogPath(value, kind) {
   return `${prefix}${p.replace(/^\/+|\/+$/g, "")}/`;
 }
 
+/** Brand pages need slug-id (apple-26303000). Plain "baseus" hits an A–Z index. */
+function looksLikeBrandId(value) {
+  return /-\d+\/?$/.test(String(value || "").trim()) || /\/brand\/[^/]+-\d+/i.test(String(value || ""));
+}
+
+function extractBrandSlugFromSearch(page, query) {
+  const q = String(query || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-\d+$/, "")
+    .replace(/[^a-z0-9а-яё_-]+/gi, "");
+  if (!q) return null;
+  const blob = JSON.stringify(page?.widgetStates || {});
+  // /brand/baseus-168785571/ or /category/.../baseus-168785571/
+  const re = new RegExp(`(?:/brand/|/category/[^/]+/)(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\w-]*-\\d+)`, "i");
+  const m = blob.match(re);
+  if (m) return m[1];
+  const loose = blob.match(/\/brand\/([a-z0-9-]+-\d+)\//i);
+  return loose ? loose[1] : null;
+}
+
+async function resolveBrandPath(brand) {
+  const raw = String(brand || "").trim();
+  if (!raw) throw new Error("brand is required");
+  if (/^https?:\/\//.test(raw) || looksLikeBrandId(raw) || raw.startsWith("/brand/")) {
+    return catalogPath(raw, "brand");
+  }
+  const probe = await fetchJson(catalogPath(raw, "brand"));
+  const pageType = probe?.pageInfo?.pageTypeTracking || "";
+  const organic = parseSearch(probe, 3).count;
+  if ((pageType === "brand/landing" || pageType === "brand_customized") && organic > 0) {
+    return catalogPath(raw, "brand");
+  }
+  const searchPage = await fetchJson(`/search/?text=${encodeURIComponent(raw)}&from_global=true`);
+  const slug = extractBrandSlugFromSearch(searchPage, raw);
+  if (!slug) {
+    throw new Error(
+      `could not resolve brand "${raw}"; pass slug with id like "apple-26303000" or a /brand/... URL`
+    );
+  }
+  return `/brand/${slug}/`;
+}
+
 function appendCatalogParams(url, { sort = "popular", priceMin, priceMax } = {}) {
   let out = url.includes("?") ? url : `${url}${url.endsWith("/") ? "" : "/"}`;
   const sorting = SORT_MAP[sort];
@@ -145,7 +188,7 @@ export async function categoryBrowse({ category, sort = "popular", priceMin, pri
 }
 
 export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax, limit = 12 }) {
-  const path = appendCatalogParams(catalogPath(brand, "brand"), { sort, priceMin, priceMax });
+  const path = appendCatalogParams(await resolveBrandPath(brand), { sort, priceMin, priceMax });
   const page = await fetchJson(path);
   return parseBrandCatalog(page, limit);
 }
