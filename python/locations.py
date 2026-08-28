@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+# Informal aliases → normalized city name used when matching suggest results.
+CITY_ALIASES = {
+    "спб": "санкт-петербург",
+    "питер": "санкт-петербург",
+    "нск": "новосибирск",
+    "екб": "екатеринбург",
+    "ебург": "екатеринбург",
+}
+
 
 def normalize_key(text: str) -> str:
     return " ".join(str(text or "").strip().lower().replace("ё", "е").split())
@@ -22,6 +31,8 @@ def parse_location_current(current: dict | None) -> dict | None:
         parts = [p.strip() for p in full.split(",")]
         if len(parts) >= 2 and parts[0] in ("Россия", "Russia"):
             region = parts[1]
+        elif len(parts) >= 2:
+            region = parts[1] if parts[0] == city else parts[0]
     return {
         "city": city,
         "region": region,
@@ -30,10 +41,10 @@ def parse_location_current(current: dict | None) -> dict | None:
 
 
 def _region_from_components(components: dict) -> str | None:
-    for key in ("province", "region", "area", "country"):
+    for key in ("province", "region", "area"):
         comp = components.get(key) or {}
         name = comp.get("name")
-        if name and key != "country":
+        if name:
             return name
     return None
 
@@ -82,12 +93,24 @@ def parse_suggestions(data: dict, limit: int = 10) -> list[dict]:
 def pick_city_match(query: str, suggestions: list[dict]) -> dict:
     if not suggestions:
         raise ValueError(f"no cities found for {query!r}")
-    q = normalize_key(query)
-    exact = [s for s in suggestions if normalize_key(s["city"]) == q]
-    if exact:
-        # Prefer city-center entry (shortest label among same city).
-        return min(exact, key=lambda s: len(s.get("label") or ""))
-    if len(suggestions) == 1:
-        return suggestions[0]
-    labels = ", ".join(s["city"] for s in suggestions[:8])
-    raise ValueError(f"ambiguous city {query!r}; pick one of: {labels}")
+    q = CITY_ALIASES.get(normalize_key(query), normalize_key(query))
+
+    def rank(s: dict) -> tuple:
+        city = normalize_key(s["city"])
+        label = normalize_key(s.get("label") or "")
+        if city == q:
+            tier = 0
+        elif city.startswith(q) or q.startswith(city):
+            tier = 1
+        elif q in city or q in label:
+            tier = 2
+        else:
+            tier = 3
+        return (tier, len(s.get("label") or ""))
+
+    ranked = sorted(suggestions, key=rank)
+    best = ranked[0]
+    if rank(best)[0] >= 3 and len(suggestions) > 1:
+        labels = ", ".join(s["city"] for s in suggestions[:8])
+        raise ValueError(f"ambiguous city {query!r}; pick one of: {labels}")
+    return best

@@ -60,11 +60,12 @@ function resetExitIdle() {
 }
 
 function withTimeout(promise, ms, label) {
+  let timer;
   return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    ),
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
   ]);
 }
 
@@ -342,7 +343,7 @@ server.registerTool(
     inputSchema: {},
     annotations: readOnly,
   },
-  tool("ozon_get_location", location)
+  tool("ozon_get_location", async () => location())
 );
 
 server.registerTool(

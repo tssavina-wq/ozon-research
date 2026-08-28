@@ -58,10 +58,23 @@ function ensureProcess() {
 
 function call(cmd, payload = {}) {
   ensureProcess();
+  if (!proc?.stdin?.writable) {
+    return Promise.reject(new Error("browser process is not writable"));
+  }
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    proc.stdin.write(JSON.stringify({ id, cmd, ...payload }) + "\n");
+    try {
+      proc.stdin.write(JSON.stringify({ id, cmd, ...payload }) + "\n", (err) => {
+        if (err) {
+          pending.delete(id);
+          reject(err);
+        }
+      });
+    } catch (err) {
+      pending.delete(id);
+      reject(err);
+    }
   });
 }
 

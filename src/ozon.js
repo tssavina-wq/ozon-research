@@ -28,10 +28,11 @@ const SORT_MAP = {
   discount: "discount",
 };
 
+// Ozon UI: "Быстрее доставка" → sort=date (not "delivery")
 const OFFERS_SORT_MAP = {
   price: "price",
   rating: "rating",
-  delivery: "delivery",
+  delivery: "date",
 };
 
 /** Accept a product as sku ("1185261285"), full url, or slug; return the site path "/product/.../". */

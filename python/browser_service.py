@@ -17,7 +17,10 @@ from urllib.parse import quote
 
 from camoufox.async_api import AsyncCamoufox
 
-from locations import normalize_key, parse_location_current, parse_suggestions, pick_city_match
+# Ensure sibling modules resolve when launched as `python python/browser_service.py`
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from locations import parse_location_current, parse_suggestions, pick_city_match
 
 HOME = "https://www.ozon.ru/"
 API = "https://www.ozon.ru/api/composer-api.bx/page/json/v2?url="
@@ -115,11 +118,21 @@ class OzonBrowser:
                     return await self._fetch_json_once(path)
                 except RuntimeError as err:
                     msg = str(err)
-                    if attempt < retries and ("HTTP 403" in msg or "HTTP 307" in msg):
+                    # Permanent client errors: do not burn a full browser relaunch
+                    if "HTTP 404" in msg or "HTTP 400" in msg:
+                        raise
+                    retryable = (
+                        "HTTP 403" in msg
+                        or "HTTP 307" in msg
+                        or "challenge" in msg.lower()
+                        or "TargetClosed" in msg
+                        or "closed" in msg.lower()
+                    )
+                    if attempt < retries and retryable:
                         log(msg, "relaunching session…")
                         await self.shutdown()
                         continue
-                    if attempt < retries:
+                    if attempt < retries and "HTTP" not in msg:
                         log("fetch failed, retrying:", err)
                         await self.shutdown()
                         continue
@@ -188,6 +201,11 @@ class OzonBrowser:
             log("set_city: opening map for", label)
             await page.goto(map_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await asyncio.sleep(5)
+
+            # After map load anti-bot may reappear — verify session still usable
+            title = await page.title()
+            if CHALLENGE_RE.search(title):
+                raise RuntimeError(f"challenge during set_city (title: {title})")
 
             pin_link = await page.evaluate(
                 """async ({ targetLat, targetLng }) => {

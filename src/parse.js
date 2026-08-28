@@ -37,6 +37,7 @@ function widgets(page, name) {
 
 /** "53 022 ₽" -> 53022 ; null/garbage -> null */
 function priceToNumber(text) {
+  if (typeof text === "number" && Number.isFinite(text)) return Math.round(text);
   if (typeof text !== "string") return null;
   const digits = text.replace(/[^\d]/g, "");
   return digits ? parseInt(digits, 10) : null;
@@ -56,6 +57,7 @@ export function parseLocation(page) {
   } else if (full.includes(",")) {
     const parts = full.split(",").map((s) => s.trim());
     if (parts[0] === "Россия" && parts.length >= 2) region = parts[1];
+    else if (parts.length >= 2) region = parts[0] === city ? parts[1] : parts[0];
   }
   return { city, region };
 }
@@ -362,23 +364,40 @@ export function parseQuestions(page, limit = 10) {
 
 // ── offers from other sellers ───────────────────────────────────────────────────
 
+function offersActiveSort(sortW) {
+  const tab = (sortW?.tabs || []).find((t) => t.isActive || t.isSelected);
+  if (!tab) return null;
+  const deeplink = tab.deeplink || tab.link || "";
+  const m = String(deeplink).match(/[?&]sort=([^&]+)/);
+  if (m) return m[1];
+  return tab.value || tab.title || null;
+}
+
 export function parseOffers(page, limit = 12) {
   const w = widget(page, "webSellerList");
   const sortW = widget(page, "webSellersSortSwitcher");
-  const selectedSort = (sortW?.tabs || []).find((t) => t.isSelected)?.value || null;
   const sellers = (w?.sellers || []).slice(0, limit).map((s) => ({
     sellerId: s.id || null,
     sku: String(s.sku || "") || null,
     name: s.name || null,
     rating: s.rating?.totalScore ?? null,
     reviews: s.rating?.reviewsCount ?? null,
-    price: priceToNumber(s.price?.cardPrice?.price) ?? null,
+    price:
+      priceToNumber(s.price?.cardPrice?.price) ??
+      priceToNumber(s.price?.price) ??
+      priceToNumber(s.price?.originalPrice) ??
+      null,
     delivery: rsText(s.advantages?.[0]?.contentRs?.headRs) || null,
     sellerUrl: cleanUrl(s.link),
     productUrl: cleanUrl(s.productLink),
     image: s.coverImage || null,
   }));
-  return { sort: selectedSort, count: sellers.length, sellers, location: parseLocation(page) };
+  return {
+    sort: offersActiveSort(sortW),
+    count: sellers.length,
+    sellers,
+    location: parseLocation(page),
+  };
 }
 
 // ── variants (aspects) ──────────────────────────────────────────────────────────
