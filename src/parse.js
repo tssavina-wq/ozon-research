@@ -253,10 +253,10 @@ export function modelKey(item) {
     .toLowerCase()
     .replace(/бренд проверен/g, "")
     .trim();
+  // Color only — keep RAM/SSD so config dedupe can group them under baseModelKey.
   let name = String(item?.name || "")
     .toLowerCase()
     .replace(COLOR_TOKEN, "$1")
-    .replace(new RegExp(`\\b\\d+\\s*(gb|гб|tb|тб|мм|cm|см|dpi)\\b`, "gi"), " ")
     .replace(new RegExp(`[^a-z0-9${CYR}]+`, "gi"), " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -264,6 +264,38 @@ export function modelKey(item) {
     name = `${brand} ${name}`.trim();
   }
   return name || String(item?.sku || "");
+}
+
+/** Strip RAM/SSD capacity so 16/32GB configs of one series share a key. */
+export function baseModelKey(item) {
+  let key = modelKey(item);
+  key = key
+    .replace(/\b\d{1,4}\s*(gb|гб|tb|тб)\b/gi, " ")
+    .replace(/\b(ddr\d?|lpddr\d?|ssd|hdd|nvme|emmc|ram)\b/gi, " ")
+    .replace(/\b\d{1,4}\s*\/\s*\d{1,4}\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return key || modelKey(item);
+}
+
+/** Pull RAM/storage hints from a listing title for configs[]. */
+export function configLabel(item) {
+  const name = String(item?.name || "");
+  const bits = [];
+  const ram = name.match(/(\d{1,3})\s*(?:gb|гб)(?:\s*(?:ram|ddr\d?|оператив\w*))?/i);
+  const ssd = name.match(/(\d{1,4})\s*(?:gb|гб|tb|тб)\s*(?:ssd|nvme|hdd)?/gi);
+  if (ram) bits.push(`${ram[1]}GB RAM`);
+  if (ssd) {
+    for (const m of ssd) {
+      const n = m.match(/(\d{1,4})\s*(gb|гб|tb|тб)/i);
+      if (!n) continue;
+      const label = `${n[1]}${n[2].toUpperCase().startsWith("T") || /тб/i.test(n[2]) ? "TB" : "GB"}`;
+      if (!bits.includes(`${label} storage`) && !bits.some((b) => b.startsWith(n[1]))) {
+        bits.push(label);
+      }
+    }
+  }
+  return bits.length ? bits.join(" / ") : null;
 }
 
 function betterSearchItem(a, b) {
@@ -278,37 +310,158 @@ function betterSearchItem(a, b) {
   return ap <= bp ? a : b;
 }
 
-/** Collapse color/size variants of the same model into one row. */
-export function dedupeSearchItems(items, { enabled = true } = {}) {
-  if (!enabled || !items?.length) return items || [];
-  const groups = new Map();
-  for (const it of items) {
-    const key = modelKey(it);
-    const variant = { sku: it.sku, name: it.name, price: it.price, url: it.url };
-    const prev = groups.get(key);
-    if (!prev) {
-      groups.set(key, {
-        ...it,
-        modelKey: key,
-        variants: [variant],
-      });
+/**
+ * Annotate review clusters.
+ *
+ * Ozon often shows color/RAM variants of ONE product card with the same rating+review
+ * count — that is normal (one review pool), not a scam signal.
+ *
+ * Flag reviewTrust=low only when the same rating+count appears on clearly different
+ * base models in the current result set (cross-model collision / suspicious).
+ */
+export function annotateReviewTrust(items) {
+  const byCluster = new Map();
+  for (const it of items || []) {
+    it.baseModelKey = it.baseModelKey || baseModelKey(it);
+    it.modelKey = it.modelKey || modelKey(it);
+    if (it.reviews == null || it.rating == null) {
+      it.reviewTrust = "unknown";
+      it.reviewsSharedAcrossModels = false;
+      it.variantReviewPool = false;
       continue;
     }
-    prev.variants.push(variant);
-    const winner = betterSearchItem(prev, it);
-    if (winner === it) {
-      groups.set(key, {
-        ...it,
-        modelKey: key,
-        variants: prev.variants,
-      });
+    const id = `r${it.rating}-${it.reviews}`;
+    if (!byCluster.has(id)) byCluster.set(id, []);
+    byCluster.get(id).push(it);
+  }
+
+  for (const [id, group] of byCluster) {
+    const models = [...new Set(group.map((i) => i.baseModelKey || i.sku))];
+    const crossModel = models.length >= 2;
+    const sameModelManySkus = !crossModel && group.length >= 2;
+
+    for (const it of group) {
+      it.reviewClusterId = id;
+      // Normal: several SKUs of one card share one review counter
+      it.variantReviewPool = sameModelManySkus;
+      // Suspicious only across different base models in this result page
+      it.reviewsSharedAcrossModels = crossModel;
+      if (crossModel) {
+        it.reviewTrust = "low";
+      } else if ((it.reviews || 0) >= 20) {
+        it.reviewTrust = "ok";
+      } else {
+        it.reviewTrust = "unknown";
+      }
     }
   }
-  return [...groups.values()].map((g) => ({
-    ...g,
-    variantCount: g.variants.length,
-    variantSkus: g.variants.map((v) => v.sku),
+  return items;
+}
+
+/**
+ * Collapse color variants and/or RAM/SSD configs of the same series.
+ * - variants[]: color/finish siblings
+ * - configs[]: memory/storage siblings under baseModelKey
+ */
+export function dedupeSearchItems(items, { colors = true, configs = true } = {}) {
+  if (!items?.length) return items || [];
+  let list = items.map((it) => ({
+    ...it,
+    modelKey: modelKey(it),
+    baseModelKey: baseModelKey(it),
   }));
+  annotateReviewTrust(list);
+
+  if (colors) {
+    const groups = new Map();
+    for (const it of list) {
+      const key = it.modelKey;
+      const variant = { sku: it.sku, name: it.name, price: it.price, url: it.url };
+      const prev = groups.get(key);
+      if (!prev) {
+        groups.set(key, { ...it, variants: [variant] });
+        continue;
+      }
+      prev.variants.push(variant);
+      const winner = betterSearchItem(prev, it);
+      if (winner === it) {
+        groups.set(key, { ...it, variants: prev.variants });
+      }
+    }
+    list = [...groups.values()].map((g) => ({
+      ...g,
+      variantCount: g.variants.length,
+      variantSkus: g.variants.map((v) => v.sku),
+    }));
+  }
+
+  if (configs) {
+    const groups = new Map();
+    for (const it of list) {
+      const key = it.baseModelKey || baseModelKey(it);
+      const cfg = {
+        sku: it.sku,
+        name: it.name,
+        price: it.price,
+        url: it.url,
+        label: configLabel(it),
+        reviews: it.reviews,
+        rating: it.rating,
+      };
+      const prev = groups.get(key);
+      if (!prev) {
+        groups.set(key, { ...it, baseModelKey: key, configs: [cfg] });
+        continue;
+      }
+      prev.configs.push(cfg);
+      const winner = betterSearchItem(prev, it);
+      if (winner === it) {
+        const configsKept = prev.configs;
+        groups.set(key, { ...it, baseModelKey: key, configs: configsKept });
+      }
+    }
+    list = [...groups.values()].map((g) => ({
+      ...g,
+      configCount: g.configs.length,
+      configSkus: g.configs.map((c) => c.sku),
+    }));
+  }
+
+  annotateReviewTrust(list);
+  return list;
+}
+
+/** Heuristic hardware fields mined from title/description when specs are sparse. */
+export function extractHardwareHints(name, descriptionText = "", characteristics = {}) {
+  const charBlob = Object.entries(characteristics || {})
+    .map(([k, v]) => `${k} ${v}`)
+    .join(" ");
+  const text = `${name || ""} ${descriptionText || ""} ${charBlob}`;
+  const out = {};
+  const set = (key, value, source) => {
+    if (value == null || value === "") return;
+    out[key] = { value, source };
+  };
+
+  const hz = text.match(/(\d{2,3})\s*(?:гц|hz)\b/i);
+  if (hz) set("screenHz", Number(hz[1]), /характеристик|гц|hz/i.test(charBlob) ? "characteristics" : "title");
+
+  const gpu = text.match(/\b((?:geforce\s*)?rtx\s*\d{3,4}(?:\s*(?:ti|super))?|(?:geforce\s*)?gtx\s*\d{3,4}(?:\s*ti)?|radeon\s*(?:rx\s*)?\d{3,4}(?:\s*xt)?)\b/i);
+  if (gpu) set("gpu", gpu[1].replace(/\s+/g, " ").trim(), "title");
+
+  const vram = text.match(/(\d{1,2})\s*(?:gb|гб)\s*(?:gddr|видео|vram)/i);
+  if (vram) set("gpuVramGb", Number(vram[1]), "title");
+
+  const tgp = text.match(/(\d{2,3})\s*(?:w|вт)\s*(?:tgp|tgp)?/i);
+  if (tgp) set("tgpW", Number(tgp[1]), "title");
+
+  const ram = text.match(/(\d{1,3})\s*(?:gb|гб)\s*(?:ram|ddr|оператив|озу)?/i);
+  if (ram) set("ramGb", Number(ram[1]), "title");
+
+  const weight = text.match(/(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b/i);
+  if (weight) set("weightKg", parseFloat(weight[1].replace(",", ".")), "title");
+
+  return out;
 }
 
 /** Extract plain text from Ozon DS text nodes. */
@@ -385,8 +538,17 @@ function parseSeller(page) {
   const name = w.sellerCell?.centerBlock?.title?.text || w.title?.text || null;
   const rating = parseFloat(String(w.rating?.title?.text || "").replace(",", ".")) || null;
   const url = cleanUrl(w.sellerCell?.common?.action?.link);
+  const logo = w.sellerCell?.leftBlock?.icon?.backgroundImage || null;
   if (!name) return null;
-  return { name, rating, url };
+  const lower = name.toLowerCase();
+  return {
+    name,
+    rating,
+    url,
+    logo,
+    isExpress: /express/i.test(name) || /ozon-express/i.test(logo || ""),
+    isOfficial: /официальн|official\s*store|флагманск/i.test(lower),
+  };
 }
 
 /** webDescription.richAnnotationJson holds rich content blocks: text items and images. */
@@ -445,6 +607,10 @@ export function parseDetails(basePage, page2) {
     if (typeof src === "string") images.push(src);
   }
 
+  const characteristics = parseShortCharacteristics(basePage);
+  const description = parseDescription(page2);
+  const extracted = extractHardwareHints(heading?.title || basePage?.seo?.title, description.text, characteristics);
+
   return {
     sku,
     name: heading?.title || basePage?.seo?.title || null,
@@ -457,8 +623,9 @@ export function parseDetails(basePage, page2) {
     reviews,
     seller: parseSeller(basePage),
     images: [...new Set(images)].slice(0, 10),
-    characteristics: parseShortCharacteristics(basePage),
-    description: parseDescription(page2),
+    characteristics,
+    extracted: Object.keys(extracted).length ? extracted : undefined,
+    description,
     location: parseLocation(basePage),
   };
 }
@@ -474,31 +641,63 @@ function unixToDate(ts) {
   return d.toISOString().slice(0, 10);
 }
 
-export function parseReviews(page, limit = 10) {
+const PACKAGING_RE =
+  /пупырк|мышк[ауи]|коврик|гравировк|упаковк|доставк|продавц|плёнк|пленк|бонус|подари|комплект поставк/i;
+const PRODUCT_RE =
+  /экран|диспле|процесс|видеокарт|rtx|gtx|батаре|автоном|клавиатур|производительн|тормоз|греетс|шум|ssd|оператив|озу|вес|герцовк|гц|fps|игр[аыуе]/i;
+
+export function parseReviews(page, limit = 10, { sort = "default", hasPhotos = false } = {}) {
   const w = widget(page, "webListReviews");
   const raw = w?.reviews || w?.items || [];
   const { rating, reviews: total } = parseProductScore(page);
 
-  const reviews = raw.slice(0, limit).map((r) => {
+  let reviews = raw.map((r) => {
     const c = r.content || {};
     const author =
       r.author?.title ||
       [r.author?.firstName, r.author?.lastName].filter(Boolean).join(" ") ||
       (r.isAnonymous ? "Аноним" : null);
+    const comment = c.comment || "";
+    const pros = c.positive || "";
+    const cons = c.negative || "";
+    const blob = `${comment} ${pros} ${cons}`;
+    const aboutProduct =
+      PRODUCT_RE.test(blob) || (!PACKAGING_RE.test(blob) && blob.trim().length > 40);
     return {
       author: author || null,
       score: typeof c.score === "number" ? c.score : null,
-      comment: c.comment || "",
-      pros: c.positive || "",
-      cons: c.negative || "",
+      comment,
+      pros,
+      cons,
       date: unixToDate(r.publishedAt || r.createdAt),
       useful: r.usefulness?.useful ?? null,
       purchased: r.isItemPurchased ?? null,
       hasPhotos: Array.isArray(c.photos) && c.photos.length > 0,
+      aboutProduct,
     };
   });
 
-  return { rating, totalReviews: total, count: reviews.length, reviews };
+  if (hasPhotos) reviews = reviews.filter((r) => r.hasPhotos);
+  if (sort === "helpful") {
+    reviews.sort((a, b) => (b.useful || 0) - (a.useful || 0) || String(b.date || "").localeCompare(String(a.date || "")));
+  } else if (sort === "date") {
+    reviews.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  } else if (sort === "product") {
+    reviews.sort((a, b) => Number(b.aboutProduct) - Number(a.aboutProduct) || (b.useful || 0) - (a.useful || 0));
+  }
+
+  reviews = reviews.slice(0, limit);
+  return {
+    rating,
+    totalReviews: total,
+    count: reviews.length,
+    sort,
+    reviews,
+    note:
+      reviews.length && reviews.filter((r) => r.purchased).length === 0
+        ? "No reviews marked purchased=true on this page — common for CN/parallel-import sellers; prefer aboutProduct=true + useful votes."
+        : undefined,
+  };
 }
 
 // ── questions ───────────────────────────────────────────────────────────────────

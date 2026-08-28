@@ -38,6 +38,16 @@ const productId = z
     'Product identifier: numeric SKU ("1850364818"), full https://www.ozon.ru/product/... URL, or slug path'
   );
 
+/** Accept product or sku (agents often pass sku= by mistake). */
+function withProductAlias(fn) {
+  return (args) => {
+    const a = { ...args };
+    if (!a.product && a.sku) a.product = a.sku;
+    if (!a.product) throw new Error("product or sku is required");
+    return fn(a);
+  };
+}
+
 const catalogId = (hint) => z.string().min(1).describe(hint);
 
 const sortSchema = z
@@ -115,7 +125,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.4.1" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.0" });
 
 server.registerTool(
   "ozon_search",
@@ -123,12 +133,12 @@ server.registerTool(
     title: "Search Ozon products",
     description:
       "Entry point for product discovery on ozon.ru. Use when the user asks to find, look up, or compare products " +
-      "by name or keywords. Returns sku, name, price (RUB number), oldPrice, discount, rating, review count, brand, " +
-      "image URL and clean product link. Use priceMin/priceMax for budget and filters{} for facets " +
-      "(brand, delivery, mouseconnection, … — keys from ozon_search_filters). " +
-      "Optional category pins results to a category slug. Color variants are deduped by default " +
-      "(modelKey + variantSkus). If sort=popular is empty/ads-only, automatically retries with rating. " +
-      "If count is 0, read hint/suggestedCategory. " +
+      "by name or keywords. Returns sku, name, price, rating, reviews, brand, url, plus reviewTrust, " +
+      "baseModelKey, configs[] / variants[]. Same review count on color/RAM variants of one card is normal " +
+      "(variantReviewPool); reviewsSharedAcrossModels only flags collisions across different models. " +
+      "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. " +
+      "Color+RAM/SSD configs are deduped by default. If sort=popular is empty/ads-only → auto rating " +
+      "(see note — not true popularity). page=2+ for next shelf. " +
       "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
       query: z
@@ -140,16 +150,31 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Category slug like besprovodnye-myshi-31940 — prefer over guessing inside filters"),
-      sort: sortSchema.describe("popular | price (cheap first) | price_desc | rating | new | discount"),
+        .describe("Category slug like igrovye-noutbuki-15821 — prefer over guessing inside filters"),
+      sort: sortSchema.describe("popular | price | price_desc | rating | new | discount"),
       priceMin: z.number().int().nonnegative().optional().describe("Minimum price in rubles"),
       priceMax: z.number().int().nonnegative().optional().describe("Maximum price in rubles"),
+      page: z.number().int().min(1).max(20).optional().describe("Results page (default 1); Ozon returns ~8 tiles/page"),
       filters: filtersSchema,
+      excludeBrands: z
+        .array(z.string())
+        .optional()
+        .describe('Drop brands/names containing these substrings, e.g. ["Neobihier"]'),
+      minReviews: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("Drop items with fewer reviews than this"),
       dedupeVariants: z
         .boolean()
         .optional()
-        .describe("Collapse color variants of the same model (default true). Set false to keep every SKU."),
-      limit: limitSchema(36, 12).describe("How many products to return (1–36)"),
+        .describe("Collapse color variants (default true)"),
+      dedupeConfigs: z
+        .boolean()
+        .optional()
+        .describe("Collapse RAM/SSD configs of same series into configs[] (default true)"),
+      limit: limitSchema(36, 12).describe("How many products to return after dedupe (1–36)"),
     },
     annotations: readOnly,
   },
@@ -166,10 +191,13 @@ server.registerTool(
       "short characteristics (5–10 fields), text description, and location {city, region} " +
       "(delivery dates elsewhere refer to this city). " +
       "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews. For Q&A use ozon_product_questions.",
-    inputSchema: { product: productId },
+    inputSchema: {
+      product: productId.optional().describe("SKU, URL, or slug"),
+      sku: z.string().min(1).optional().describe("Alias for product (same meaning)"),
+    },
     annotations: readOnly,
   },
-  tool("ozon_product_details", details)
+  tool("ozon_product_details", withProductAlias(details))
 );
 
 server.registerTool(
@@ -177,16 +205,23 @@ server.registerTool(
   {
     title: "Get Ozon product reviews",
     description:
-      "Real buyer reviews for a product. Use when the user asks about quality, reliability, pros/cons, or real experience. " +
-      "Returns: author, score 1–5, comment, pros, cons, date, useful votes, purchased flag, hasPhotos. " +
-      "Requires product sku or URL.",
+      "Buyer reviews. sort=helpful|date|product (aboutProduct first)|default. " +
+      "hasPhotos=true keeps only reviews with photos. Each review has aboutProduct " +
+      "(heuristic: product experience vs packaging/seller gifts). " +
+      "Accepts product or sku.",
     inputSchema: {
-      product: productId,
-      limit: limitSchema(30, 10).describe("Number of reviews to fetch"),
+      product: productId.optional(),
+      sku: z.string().min(1).optional().describe("Alias for product"),
+      sort: z
+        .enum(["helpful", "date", "product", "default"])
+        .optional()
+        .describe("Client-side sort (Ozon composer ignores URL sort)"),
+      hasPhotos: z.boolean().optional().describe("Only reviews with photos"),
+      limit: limitSchema(30, 10).describe("Number of reviews to return"),
     },
     annotations: readOnly,
   },
-  tool("ozon_product_reviews", reviews)
+  tool("ozon_product_reviews", withProductAlias(reviews))
 );
 
 server.registerTool(
@@ -198,12 +233,13 @@ server.registerTool(
       "warranty, regional versions, setup tips — things buyers ask before purchase. " +
       "Returns question text, author, date, and answers (seller or buyers). Requires product sku or URL.",
     inputSchema: {
-      product: productId,
+      product: productId.optional(),
+      sku: z.string().min(1).optional(),
       limit: limitSchema(30, 10).describe("Number of questions to fetch"),
     },
     annotations: readOnly,
   },
-  tool("ozon_product_questions", questions)
+  tool("ozon_product_questions", withProductAlias(questions))
 );
 
 server.registerTool(
@@ -217,13 +253,14 @@ server.registerTool(
       "Delivery dates are for location.city — call ozon_search_cities then ozon_set_city if user asked about another city. " +
       "Requires product sku (from ozon_search or ozon_product_details).",
     inputSchema: {
-      product: productId,
+      product: productId.optional(),
+      sku: z.string().min(1).optional(),
       sort: z.enum(["price", "rating", "delivery"]).default("price").describe("Sort offers by price, rating, or delivery"),
       limit: limitSchema(36, 12).describe("Max offers to return"),
     },
     annotations: readOnly,
   },
-  tool("ozon_product_offers", offers)
+  tool("ozon_product_offers", withProductAlias(offers))
 );
 
 server.registerTool(
@@ -234,10 +271,13 @@ server.registerTool(
       "Product configuration options: memory size, color, storage, etc. Each variant has its own sku and price. " +
       "Use when user asks '512GB or 1TB?', 'what colors available?', or needs sku for a specific configuration. " +
       "Returns aspects[] with variants[]: sku, label, price, oldPrice, available, url.",
-    inputSchema: { product: productId },
+    inputSchema: {
+      product: productId.optional(),
+      sku: z.string().min(1).optional(),
+    },
     annotations: readOnly,
   },
-  tool("ozon_product_variants", variants)
+  tool("ozon_product_variants", withProductAlias(variants))
 );
 
 server.registerTool(
@@ -248,10 +288,13 @@ server.registerTool(
       "Technical characteristics from the listing (fieldCount varies — many cards are sparse with <8 fields). " +
       "When sparse/specsIncomplete=true, do not invent hardware numbers; use ozon_product_questions or another SKU of the same model. " +
       "More complete than ozon_product_details.characteristics when the seller filled the table.",
-    inputSchema: { product: productId },
+    inputSchema: {
+      product: productId.optional(),
+      sku: z.string().min(1).optional(),
+    },
     annotations: readOnly,
   },
-  tool("ozon_product_specs", specs)
+  tool("ozon_product_specs", withProductAlias(specs))
 );
 
 server.registerTool(
@@ -305,10 +348,11 @@ server.registerTool(
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
       filters: filtersSchema,
-      dedupeVariants: z
-        .boolean()
-        .optional()
-        .describe("Collapse color variants of the same model (default true)"),
+      excludeBrands: z.array(z.string()).optional(),
+      minReviews: z.number().int().nonnegative().optional(),
+      page: z.number().int().min(1).max(20).optional(),
+      dedupeVariants: z.boolean().optional().describe("Collapse color variants (default true)"),
+      dedupeConfigs: z.boolean().optional().describe("Collapse RAM/SSD configs (default true)"),
       limit: limitSchema(36, 12),
     },
     annotations: readOnly,
@@ -346,12 +390,13 @@ server.registerTool(
       "Use when user asks what to buy with this product or wants alternatives. " +
       "Returns product list same format as ozon_search.",
     inputSchema: {
-      product: productId,
+      product: productId.optional(),
+      sku: z.string().min(1).optional(),
       limit: limitSchema(36, 12),
     },
     annotations: readOnly,
   },
-  tool("ozon_related_products", relatedProducts)
+  tool("ozon_related_products", withProductAlias(relatedProducts))
 );
 
 server.registerTool(
@@ -359,20 +404,19 @@ server.registerTool(
   {
     title: "Compare Ozon products side-by-side",
     description:
-      "Fetch details+specs for 2–6 products in one call and build a characteristic matrix. " +
-      "Use for 'which is better', hardware shootouts, or top-N after search. " +
-      "Returns products[] (price, rating, seller, characteristics) and matrix[specName][sku]=value. " +
-      "Sparse listings stay sparse — null means Ozon had no field, do not invent values.",
+      "Fetch details+specs for 2–8 products and build a characteristic matrix. " +
+      "Also returns extracted{} hardware hints from title when specs are sparse. " +
+      "missingKeysByProduct[sku] = fields present in the matrix but missing on that SKU.",
     inputSchema: {
       products: z
         .array(productId)
         .min(2)
-        .max(6)
-        .describe("2–6 product SKUs, URLs, or slugs to compare"),
+        .max(8)
+        .describe("2–8 product SKUs, URLs, or slugs to compare"),
     },
     annotations: readOnly,
   },
-  tool("ozon_compare_products", compareProducts, 120000)
+  tool("ozon_compare_products", compareProducts, 150000)
 );
 
 server.registerTool(

@@ -15,6 +15,10 @@ import {
   parseRelatedProducts,
   parseSearchFilters,
   dedupeSearchItems,
+  annotateReviewTrust,
+  modelKey,
+  baseModelKey,
+  extractHardwareHints,
 } from "./parse.js";
 import {
   filtersNeedResolve,
@@ -212,7 +216,7 @@ function assertCategorySlug(categoryInput, page) {
   );
 }
 
-function appendCatalogParams(url, { sort = "popular", priceMin, priceMax } = {}) {
+function appendCatalogParams(url, { sort = "popular", priceMin, priceMax, page } = {}) {
   let out = url.includes("?") ? url : `${url}${url.endsWith("/") ? "" : "/"}`;
   const sorting = SORT_MAP[sort];
   const params = new URLSearchParams(out.includes("?") ? out.split("?")[1] : "");
@@ -222,6 +226,7 @@ function appendCatalogParams(url, { sort = "popular", priceMin, priceMax } = {})
     const max = priceMax ?? 99999999;
     params.set("currency_price", `${min}.000;${max}.000`);
   }
+  if (page != null && page > 1) params.set("page", String(page));
   const base = out.split("?")[0];
   const qs = params.toString();
   return qs ? `${base}?${qs}` : base;
@@ -234,6 +239,7 @@ async function buildCatalogUrl({
   sort = "popular",
   priceMin,
   priceMax,
+  page,
   filters,
 }) {
   let applied = filters && typeof filters === "object" ? { ...filters } : {};
@@ -273,20 +279,61 @@ async function buildCatalogUrl({
     base = `/search/?text=${encodeURIComponent(query)}&from_global=true`;
   }
 
-  let url = appendCatalogParams(base, { sort, priceMin, priceMax });
+  let url = appendCatalogParams(base, { sort, priceMin, priceMax, page });
   url = mergeFilterParams(url, filterParams);
   return { url, category: cat || null, appliedFilters: applied };
 }
 
-function finalizeItems(parsed, { limit = 12, dedupeVariants = true } = {}) {
+function finalizeItems(
+  parsed,
+  {
+    limit = 12,
+    dedupeVariants = true,
+    dedupeConfigs = true,
+    excludeBrands = [],
+    minReviews,
+  } = {}
+) {
   let items = parsed.items || [];
-  if (dedupeVariants) items = dedupeSearchItems(items);
+  const exclude = (excludeBrands || []).map((b) => String(b).toLowerCase().trim()).filter(Boolean);
+  if (exclude.length) {
+    items = items.filter((it) => {
+      const brand = String(it.brand || "").toLowerCase();
+      const name = String(it.name || "").toLowerCase();
+      return !exclude.some((b) => brand.includes(b) || name.includes(b));
+    });
+  }
+  if (minReviews != null) {
+    items = items.filter((it) => (it.reviews || 0) >= minReviews);
+  }
+  if (dedupeVariants || dedupeConfigs) {
+    items = dedupeSearchItems(items, { colors: dedupeVariants, configs: dedupeConfigs });
+  } else {
+    items = annotateReviewTrust(
+      items.map((it) => ({
+        ...it,
+        modelKey: it.modelKey || modelKey(it),
+        baseModelKey: it.baseModelKey || baseModelKey(it),
+      }))
+    );
+  }
   items = items.slice(0, limit);
+  const cross = items.filter((i) => i.reviewsSharedAcrossModels).length;
+  const warnings = [];
+  if (cross >= 2) {
+    warnings.push(
+      `${cross} items share the same rating/review count across different baseModelKey values ` +
+        `(reviewsSharedAcrossModels) — unusual; verify they are not unrelated listings. ` +
+        `Same count on color/RAM variants of one model is normal (variantReviewPool).`
+    );
+  }
   return {
     items,
     count: items.length,
     sponsoredOnly: parsed.sponsoredOnly || false,
     dedupeVariants: Boolean(dedupeVariants),
+    dedupeConfigs: Boolean(dedupeConfigs),
+    warnings,
   };
 }
 
@@ -296,15 +343,19 @@ export async function search({
   sort = "popular",
   priceMin,
   priceMax,
+  page = 1,
   filters,
   limit = 12,
   dedupeVariants = true,
+  dedupeConfigs = true,
+  excludeBrands,
+  minReviews,
 } = {}) {
   if ((!query || !String(query).trim()) && !category && !(filters && filters.category)) {
     throw new Error("query or category is required");
   }
   const q = query ? String(query).trim() : undefined;
-  const fetchLimit = dedupeVariants ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+  const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
 
   const built = await buildCatalogUrl({
     query: q,
@@ -312,13 +363,14 @@ export async function search({
     sort,
     priceMin,
     priceMax,
+    page,
     filters,
   });
-  let page = await fetchJson(built.url);
-  if (built.category) assertCategorySlug(built.category, page);
+  let pageData = await fetchJson(built.url);
+  if (built.category) assertCategorySlug(built.category, pageData);
 
   let sortUsed = sort;
-  let parsed = parseSearch(page, fetchLimit);
+  let parsed = parseSearch(pageData, fetchLimit);
   let note = null;
 
   // Ozon "popular" (no sorting / ads shelf) is often empty or ads-only with price filters.
@@ -330,24 +382,32 @@ export async function search({
       sort: "rating",
       priceMin,
       priceMax,
+      page,
       filters: built.appliedFilters,
     });
     const altPage = await fetchJson(alt.url);
     const altParsed = parseSearch(altPage, fetchLimit);
     if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
-      page = altPage;
+      pageData = altPage;
       parsed = altParsed;
       sortUsed = "rating";
       note =
-        "sort=popular returned empty or ads-only results with these filters; automatically used sort=rating";
+        "sort=popular returned empty or ads-only results with these filters; automatically used sort=rating (not a true popularity signal)";
     }
   }
 
-  const finalized = finalizeItems(parsed, { limit, dedupeVariants });
+  const finalized = finalizeItems(parsed, {
+    limit,
+    dedupeVariants,
+    dedupeConfigs,
+    excludeBrands,
+    minReviews,
+  });
   const out = {
     query: q || null,
     category: built.category,
     sort: sortUsed,
+    page: page || 1,
     filters:
       built.appliedFilters && Object.keys(built.appliedFilters).length
         ? built.appliedFilters
@@ -355,13 +415,15 @@ export async function search({
     count: finalized.count,
     items: finalized.items,
     dedupeVariants: finalized.dedupeVariants,
+    dedupeConfigs: finalized.dedupeConfigs,
   };
   if (sortUsed !== sort) out.requestedSort = sort;
   if (finalized.sponsoredOnly) out.sponsoredOnly = true;
   if (note) out.note = note;
+  if (finalized.warnings?.length) out.warnings = finalized.warnings;
 
   if (finalized.count === 0) {
-    const filt = parseSearchFilters(page, q || "");
+    const filt = parseSearchFilters(pageData, q || "");
     const cat = filt.filters?.find((f) => f.key === "category");
     const active = (cat?.options || []).find((o) => o.active && /\/category\//.test(o.url || ""));
     const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1];
@@ -372,7 +434,7 @@ export async function search({
       out.suggestedCategory = slug;
     } else {
       out.hint =
-        "No products found. Try ozon_search_filters for filter keys, loosen filters, or a more specific query.";
+        "No products found. Try ozon_search_filters for filter keys, loosen filters, excludeBrands, or page=2.";
     }
   }
   return out;
@@ -387,10 +449,12 @@ export async function details({ product }) {
   return parseDetails(basePage, page2);
 }
 
-export async function reviews({ product, limit = 10 }) {
-  const path = productPath(product);
+export async function reviews({ product, sku, limit = 10, sort = "helpful", hasPhotos = false } = {}) {
+  const id = product || sku;
+  const path = productPath(id);
+  // Fetch a wider window then sort/filter client-side (composer ignores most sort query params).
   const page = await fetchJson(`${path}reviews/`);
-  return parseReviews(page, limit);
+  return parseReviews(page, limit, { sort, hasPhotos });
 }
 
 export async function questions({ product, limit = 10 }) {
@@ -436,22 +500,27 @@ export async function categoryBrowse({
   sort = "popular",
   priceMin,
   priceMax,
+  page = 1,
   filters,
   limit = 12,
   dedupeVariants = true,
+  dedupeConfigs = true,
+  excludeBrands,
+  minReviews,
 } = {}) {
-  const fetchLimit = dedupeVariants ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+  const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
   const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
     category,
     sort,
     priceMin,
     priceMax,
+    page,
     filters,
   });
-  let page = await fetchJson(url);
-  assertCategorySlug(resolvedCategory || category, page);
+  let pageData = await fetchJson(url);
+  assertCategorySlug(resolvedCategory || category, pageData);
   let sortUsed = sort;
-  let parsed = parseSearch(page, fetchLimit);
+  let parsed = parseSearch(pageData, fetchLimit);
   let note = null;
 
   if (sort === "popular" && (parsed.count === 0 || parsed.sponsoredOnly)) {
@@ -460,30 +529,40 @@ export async function categoryBrowse({
       sort: "rating",
       priceMin,
       priceMax,
+      page,
       filters: appliedFilters,
     });
     const altPage = await fetchJson(alt.url);
     const altParsed = parseSearch(altPage, fetchLimit);
     if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
-      page = altPage;
+      pageData = altPage;
       parsed = altParsed;
       sortUsed = "rating";
       note =
-        "sort=popular returned empty or ads-only results; automatically used sort=rating";
+        "sort=popular returned empty or ads-only results; automatically used sort=rating (not a true popularity signal)";
     }
   }
 
-  const finalized = finalizeItems(parsed, { limit, dedupeVariants });
-  const meta = parseCategoryBrowse(page, fetchLimit);
+  const finalized = finalizeItems(parsed, {
+    limit,
+    dedupeVariants,
+    dedupeConfigs,
+    excludeBrands,
+    minReviews,
+  });
+  const meta = parseCategoryBrowse(pageData, fetchLimit);
   return {
     ...meta,
     sort: sortUsed,
+    page: page || 1,
     requestedSort: sortUsed !== sort ? sort : undefined,
     note: note || undefined,
+    warnings: finalized.warnings?.length ? finalized.warnings : undefined,
     filters: appliedFilters && Object.keys(appliedFilters).length ? appliedFilters : undefined,
     count: finalized.count,
     items: finalized.items,
     dedupeVariants: finalized.dedupeVariants,
+    dedupeConfigs: finalized.dedupeConfigs,
     sponsoredOnly: finalized.sponsoredOnly || undefined,
   };
 }
@@ -510,13 +589,13 @@ export async function relatedProducts({ product, limit = 12 }) {
   return { product: productSku(product), ...parseRelatedProducts(page, limit) };
 }
 
-/** Compare 2–6 products: details + specs in one response with a characteristic matrix. */
+/** Compare 2–8 products: details + specs in one response with a characteristic matrix. */
 export async function compareProducts({ products }) {
   const list = [
     ...new Set((products || []).map((p) => String(p || "").trim()).filter(Boolean)),
   ];
   if (list.length < 2) throw new Error("products requires at least 2 items (sku, url, or slug)");
-  if (list.length > 6) throw new Error("products supports at most 6 items");
+  if (list.length > 8) throw new Error("products supports at most 8 items");
 
   const rows = [];
   for (const product of list) {
@@ -533,6 +612,9 @@ export async function compareProducts({ products }) {
       const short = d.characteristics || {};
       const full = s.characteristics || {};
       const characteristics = { ...short, ...full };
+      const extracted =
+        d.extracted ||
+        extractHardwareHints(d.name, d.description?.text, characteristics);
       rows.push({
         sku: d.sku || skuHint,
         name: d.name,
@@ -549,6 +631,7 @@ export async function compareProducts({ products }) {
         specsIncomplete:
           Object.keys(characteristics).length === 0 || Object.keys(characteristics).length < 8,
         characteristics,
+        extracted: Object.keys(extracted || {}).length ? extracted : undefined,
         error: null,
       });
     } catch (err) {
@@ -559,6 +642,7 @@ export async function compareProducts({ products }) {
         characteristics: {},
         fieldCount: 0,
         sparse: true,
+        specsIncomplete: true,
         error: err?.message || String(err),
       });
     }
@@ -568,28 +652,27 @@ export async function compareProducts({ products }) {
   for (const r of rows) {
     for (const k of Object.keys(r.characteristics || {})) keys.add(k);
   }
+  const allKeys = [...keys].sort((a, b) => a.localeCompare(b, "ru"));
   const matrix = {};
-  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "ru"))) {
+  for (const key of allKeys) {
     matrix[key] = {};
     for (const r of rows) {
       matrix[key][r.sku] = r.characteristics?.[key] ?? null;
     }
   }
 
-  const onlyIn = {};
+  const missingKeysByProduct = {};
   for (const r of rows) {
-    onlyIn[r.sku] = Object.keys(r.characteristics || {}).filter((k) =>
-      rows.some((other) => other.sku !== r.sku && other.characteristics?.[k] == null)
-    );
+    missingKeysByProduct[r.sku] = allKeys.filter((k) => r.characteristics?.[k] == null);
   }
 
   return {
     count: rows.length,
     products: rows,
     matrix,
-    missingKeysByProduct: onlyIn,
-    note: rows.some((r) => r.sparse)
-      ? "Some listings have sparse specs — null cells are missing on Ozon, not MCP gaps. Prefer another SKU of the same model if needed."
+    missingKeysByProduct,
+    note: rows.some((r) => r.sparse || r.specsIncomplete)
+      ? "Some listings have sparse specs — check extracted{} (from title/text) and prefer another SKU of the same model."
       : null,
   };
 }

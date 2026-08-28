@@ -16,17 +16,17 @@ MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru) (с
 
 | Tool | Назначение |
 |---|---|
-| `ozon_search` | Поиск товаров (+ `filters`, `category`) |
-| `ozon_product_details` | Карточка товара (+ `location`) |
-| `ozon_product_reviews` | Отзывы покупателей |
+| `ozon_search` | Поиск (+ filters, dedupe, reviewTrust, page) |
+| `ozon_product_details` | Карточка (+ `extracted`, seller.isExpress) |
+| `ozon_product_reviews` | Отзывы (sort helpful/date/product, aboutProduct) |
 | `ozon_product_questions` | Вопросы и ответы на карточке |
 | `ozon_product_offers` | Тот же товар у других продавцов (+ даты доставки, `location`) |
 | `ozon_product_variants` | Варианты (память, цвет, …) |
 | `ozon_product_specs` | Полные характеристики |
-| `ozon_compare_products` | Сравнение 2–6 товаров (матрица характеристик) |
+| `ozon_compare_products` | Сравнение 2–8 товаров (матрица + extracted) |
 | `ozon_seller_info` | Профиль продавца |
 | `ozon_seller_catalog` | Каталог магазина |
-| `ozon_category_browse` | Товары в категории (+ `filters`) |
+| `ozon_category_browse` | Товары в категории (+ filters, dedupe) |
 | `ozon_brand_catalog` | Витрина бренда (+ `filters`) |
 | `ozon_related_products` | «Покупают вместе» / похожие |
 | `ozon_search_filters` | Доступные фильтры поиска |
