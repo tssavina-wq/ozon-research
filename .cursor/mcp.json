@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "ozon": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--init",
+        "--stop-timeout=10",
+        "--shm-size=1g",
+        "--label", "ozon-mcp-pro=1",
+        "ozon-mcp-pro:latest"
+      ]
+    }
+  }
+}
