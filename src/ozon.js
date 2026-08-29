@@ -25,6 +25,7 @@ import {
   parseDelivery,
 } from "./parse.js";
 import { wantCompact, applyCompact } from "./compact.js";
+import { formatCurrencyPrice } from "./counts.js";
 import {
   filtersNeedResolve,
   resolveFilterTitles,
@@ -255,9 +256,7 @@ function appendCatalogParams(url, { sort = "popular", priceMin, priceMax, page }
   const params = new URLSearchParams(out.includes("?") ? out.split("?")[1] : "");
   if (sorting) params.set("sorting", sorting);
   if (priceMin != null || priceMax != null) {
-    const min = priceMin ?? 0;
-    const max = priceMax ?? 99999999;
-    params.set("currency_price", `${min}.000;${max}.000`);
+    params.set("currency_price", formatCurrencyPrice(priceMin, priceMax));
   }
   if (page != null && page > 1) params.set("page", String(page));
   const base = out.split("?")[0];
@@ -325,9 +324,20 @@ function finalizeItems(
     dedupeConfigs = true,
     excludeBrands = [],
     minReviews,
+    priceMin,
+    priceMax,
   } = {}
 ) {
   let items = parsed.items || [];
+  // Ozon sometimes ignores currency_price — always enforce locally
+  if (priceMin != null) {
+    const min = Number(priceMin);
+    items = items.filter((it) => it.price == null || it.price >= min);
+  }
+  if (priceMax != null) {
+    const max = Number(priceMax);
+    items = items.filter((it) => it.price == null || it.price <= max);
+  }
   const exclude = (excludeBrands || []).map((b) => String(b).toLowerCase().trim()).filter(Boolean);
   if (exclude.length) {
     items = items.filter((it) => {
@@ -370,6 +380,103 @@ function finalizeItems(
   };
 }
 
+async function mapPool(items, concurrency, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.min(concurrency, Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
+}
+
+/**
+ * Attach seller (+ optional delivery) and filter by seller rating/orders.
+ * Seller order counts come from ozon_seller_info badges (shop-level, not SKU sales).
+ */
+async function enrichAndFilterSellers(
+  items,
+  { minSellerRating, minSellerOrders, withDelivery, withSeller, limit }
+) {
+  const needOrders = minSellerOrders != null;
+  const needRating = minSellerRating != null;
+  const needDetails = needOrders || needRating || withDelivery || withSeller;
+  if (!needDetails || !items.length) return { items, notes: [] };
+
+  const notes = [
+    "Seller orders/rating are shop-level (not per-SKU sales). Filtered via product card + seller page.",
+  ];
+  const sellerCache = new Map(); // seller path → info
+
+  async function loadSeller(sellerUrl) {
+    if (!sellerUrl) return null;
+    const key = String(sellerUrl);
+    if (sellerCache.has(key)) return sellerCache.get(key);
+    const p = (async () => {
+      try {
+        return await sellerInfo({ seller: key });
+      } catch {
+        return null;
+      }
+    })();
+    sellerCache.set(key, p);
+    return p;
+  }
+
+  const candidates = items.slice(0, Math.min(items.length, Math.max(limit * 4, limit)));
+  const rows = await mapPool(candidates, 3, async (it) => {
+    try {
+      const d = await details({ product: it.sku, compact: false, rich: true });
+      const seller = {
+        name: d.seller?.name || null,
+        rating: d.seller?.rating ?? null,
+        url: d.seller?.url || null,
+        orders: null,
+        reviewCount: null,
+        isOfficial: d.seller?.isOfficial || undefined,
+        isExpress: d.seller?.isExpress || undefined,
+      };
+      if (needOrders || withSeller) {
+        const info = await loadSeller(seller.url);
+        if (info) {
+          seller.orders = info.orders ?? null;
+          seller.reviewCount = info.reviewCount ?? null;
+          if (seller.rating == null && info.rating != null) seller.rating = info.rating;
+          if (!seller.name && info.name) seller.name = info.name;
+        }
+      }
+      if (needRating && (seller.rating == null || seller.rating < minSellerRating)) return null;
+      if (needOrders && (seller.orders == null || seller.orders < minSellerOrders)) return null;
+
+      const row = { ...it, seller };
+      if (withDelivery && d.delivery) {
+        row.delivery = {
+          summary: d.delivery.summary,
+          best: d.delivery.best
+            ? {
+                title: d.delivery.best.title,
+                dateText: d.delivery.best.dateText,
+                kind: d.delivery.best.kind,
+                text: d.delivery.best.text,
+              }
+            : null,
+        };
+        row.location = d.location || undefined;
+      }
+      return row;
+    } catch {
+      return null;
+    }
+  });
+
+  const kept = rows.filter(Boolean).slice(0, limit);
+  return { items: kept, notes };
+}
+
 export async function search({
   query,
   category,
@@ -383,6 +490,10 @@ export async function search({
   dedupeConfigs = true,
   excludeBrands,
   minReviews,
+  minSellerRating,
+  minSellerOrders,
+  withDelivery = false,
+  withSeller = false,
   compact,
   rich,
 } = {}) {
@@ -390,7 +501,12 @@ export async function search({
     throw new Error("query or category is required");
   }
   const q = query ? String(query).trim() : undefined;
-  const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+  const enrich =
+    minSellerRating != null || minSellerOrders != null || withDelivery || withSeller;
+  const fetchLimit = Math.min(
+    36,
+    Math.max(limit * (enrich ? 5 : dedupeVariants || dedupeConfigs ? 3 : 1), limit)
+  );
 
   const built = await buildCatalogUrl({
     query: q,
@@ -408,36 +524,56 @@ export async function search({
   let parsed = parseSearch(pageData, fetchLimit);
   let note = null;
 
-  // Ozon "popular" (no sorting / ads shelf) is often empty or ads-only with price filters.
-  // Prefer organic rating results instead of making the agent guess.
+  // Ozon "popular" (no sorting) is often empty or ads-only with filters — try organic sorts.
   if (sort === "popular" && (parsed.count === 0 || parsed.sponsoredOnly)) {
-    const alt = await buildCatalogUrl({
-      query: q,
-      category: built.category || category,
-      sort: "rating",
-      priceMin,
-      priceMax,
-      page,
-      filters: built.appliedFilters,
-    });
-    const altPage = await fetchJson(alt.url);
-    const altParsed = parseSearch(altPage, fetchLimit);
-    if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
-      pageData = altPage;
-      parsed = altParsed;
-      sortUsed = "rating";
-      note =
-        "sort=popular returned empty or ads-only results with these filters; automatically used sort=rating (not a true popularity signal)";
+    for (const altSort of ["rating", "new", "discount"]) {
+      const alt = await buildCatalogUrl({
+        query: q,
+        category: built.category || category,
+        sort: altSort,
+        priceMin,
+        priceMax,
+        page,
+        filters: built.appliedFilters,
+      });
+      const altPage = await fetchJson(alt.url);
+      const altParsed = parseSearch(altPage, fetchLimit);
+      if (altParsed.count > 0 && !altParsed.sponsoredOnly) {
+        pageData = altPage;
+        parsed = altParsed;
+        sortUsed = altSort;
+        note =
+          `sort=popular returned empty or ads-only results; used sort=${altSort} instead ` +
+          `(not a true popularity signal). Prefer category from ozon_list_categories + sort=rating.`;
+        break;
+      }
     }
   }
 
   const finalized = finalizeItems(parsed, {
-    limit,
+    limit: enrich ? fetchLimit : limit,
     dedupeVariants,
     dedupeConfigs,
     excludeBrands,
     minReviews,
+    priceMin,
+    priceMax,
   });
+
+  let items = finalized.items;
+  let enrichNotes = [];
+  if (enrich) {
+    const er = await enrichAndFilterSellers(items, {
+      minSellerRating,
+      minSellerOrders,
+      withDelivery,
+      withSeller: withSeller || minSellerOrders != null || minSellerRating != null,
+      limit,
+    });
+    items = er.items;
+    enrichNotes = er.notes || [];
+  }
+
   const out = {
     query: q || null,
     category: built.category,
@@ -447,21 +583,24 @@ export async function search({
       built.appliedFilters && Object.keys(built.appliedFilters).length
         ? built.appliedFilters
         : undefined,
-    count: finalized.count,
-    items: finalized.items,
+    count: items.length,
+    items,
     dedupeVariants: finalized.dedupeVariants,
     dedupeConfigs: finalized.dedupeConfigs,
   };
   if (sortUsed !== sort) out.requestedSort = sort;
   if (finalized.sponsoredOnly) out.sponsoredOnly = true;
   if (note) out.note = note;
-  if (finalized.warnings?.length) out.warnings = finalized.warnings;
+  const warnings = [...(finalized.warnings || []), ...enrichNotes];
+  if (warnings.length) out.warnings = warnings;
+  if (minSellerRating != null) out.minSellerRating = minSellerRating;
+  if (minSellerOrders != null) out.minSellerOrders = minSellerOrders;
 
-  if (finalized.count === 0) {
+  if (items.length === 0) {
     const filt = parseSearchFilters(pageData, q || "");
     const cat = filt.filters?.find((f) => f.key === "category");
     const active = (cat?.options || []).find((o) => o.active && /\/category\//.test(o.url || ""));
-    const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1];
+    const slug = active?.url?.match(/\/category\/([^/?#]+)/)?.[1] || active?.slug;
     if (slug) {
       out.hint =
         `No products parsed for this query; Ozon maps it to category "${slug}". ` +
@@ -469,7 +608,7 @@ export async function search({
       out.suggestedCategory = slug;
     } else {
       out.hint =
-        "No products found. Try ozon_search_filters for filter keys, loosen filters, excludeBrands, or page=2.";
+        "No products found. Try ozon_list_categories, loosen price/seller filters, or page=2.";
     }
   }
   return maybeCompact("search", out, { compact, rich });
@@ -632,10 +771,19 @@ export async function categoryBrowse({
   dedupeConfigs = true,
   excludeBrands,
   minReviews,
+  minSellerRating,
+  minSellerOrders,
+  withDelivery = false,
+  withSeller = false,
   compact,
   rich,
 } = {}) {
-  const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
+  const enrich =
+    minSellerRating != null || minSellerOrders != null || withDelivery || withSeller;
+  const fetchLimit = Math.min(
+    36,
+    Math.max(limit * (enrich ? 5 : dedupeVariants || dedupeConfigs ? 3 : 1), limit)
+  );
   const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
     category,
     sort,
@@ -651,43 +799,63 @@ export async function categoryBrowse({
   let note = null;
 
   if (sort === "popular" && (parsed.count === 0 || parsed.sponsoredOnly)) {
-    const alt = await buildCatalogUrl({
-      category: resolvedCategory || category,
-      sort: "rating",
-      priceMin,
-      priceMax,
-      page,
-      filters: appliedFilters,
-    });
-    const altPage = await fetchJson(alt.url);
-    const altParsed = parseSearch(altPage, fetchLimit);
-    if (altParsed.count > 0 && (parsed.count === 0 || !altParsed.sponsoredOnly)) {
-      pageData = altPage;
-      parsed = altParsed;
-      sortUsed = "rating";
-      note =
-        "sort=popular returned empty or ads-only results; automatically used sort=rating (not a true popularity signal)";
+    for (const altSort of ["rating", "new", "discount"]) {
+      const alt = await buildCatalogUrl({
+        category: resolvedCategory || category,
+        sort: altSort,
+        priceMin,
+        priceMax,
+        page,
+        filters: appliedFilters,
+      });
+      const altPage = await fetchJson(alt.url);
+      const altParsed = parseSearch(altPage, fetchLimit);
+      if (altParsed.count > 0 && !altParsed.sponsoredOnly) {
+        pageData = altPage;
+        parsed = altParsed;
+        sortUsed = altSort;
+        note = `sort=popular returned empty or ads-only results; used sort=${altSort} instead`;
+        break;
+      }
     }
   }
 
   const finalized = finalizeItems(parsed, {
-    limit,
+    limit: enrich ? fetchLimit : limit,
     dedupeVariants,
     dedupeConfigs,
     excludeBrands,
     minReviews,
+    priceMin,
+    priceMax,
   });
+
+  let items = finalized.items;
+  let enrichNotes = [];
+  if (enrich) {
+    const er = await enrichAndFilterSellers(items, {
+      minSellerRating,
+      minSellerOrders,
+      withDelivery,
+      withSeller: withSeller || minSellerOrders != null || minSellerRating != null,
+      limit,
+    });
+    items = er.items;
+    enrichNotes = er.notes || [];
+  }
+
   const meta = parseCategoryBrowse(pageData, fetchLimit);
+  const warnings = [...(finalized.warnings || []), ...enrichNotes];
   const out = {
     ...meta,
     sort: sortUsed,
     page: page || 1,
     requestedSort: sortUsed !== sort ? sort : undefined,
     note: note || undefined,
-    warnings: finalized.warnings?.length ? finalized.warnings : undefined,
+    warnings: warnings.length ? warnings : undefined,
     filters: appliedFilters && Object.keys(appliedFilters).length ? appliedFilters : undefined,
-    count: finalized.count,
-    items: finalized.items,
+    count: items.length,
+    items,
     dedupeVariants: finalized.dedupeVariants,
     dedupeConfigs: finalized.dedupeConfigs,
     sponsoredOnly: finalized.sponsoredOnly || undefined,

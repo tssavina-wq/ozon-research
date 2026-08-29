@@ -1,3 +1,5 @@
+import { parseHumanCount, formatCurrencyPrice } from "./counts.js";
+
 /** Build Ozon catalog query params from agent-facing filter objects. */
 
 /**
@@ -13,7 +15,8 @@
  * Ozon encoding:
  * - multi checkbox: comma-separated keys  brand=1,2
  * - boolean: key=t
- * - range: key=min;max  (currency_price uses min.000;max.000)
+ * - range: key=min;max
+ * - currency_price (via priceMin/priceMax): "1000;5000" — NOT "1000.000;5000.000" (Ozon ignores that)
  * - category: switches path to /category/{slug}/
  */
 
@@ -159,12 +162,15 @@ export function serializeFilters(filters) {
     // skip price aliases — use priceMin/priceMax on the tool
     if (k === "currency_price" || k === "price") {
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        const min = raw.min ?? 0;
-        const max = raw.max ?? 99999999;
-        params.set("currency_price", `${min}.000;${max}.000`);
+        params.set("currency_price", formatCurrencyPrice(raw.min, raw.max));
       } else {
         const s = String(asList(raw)[0] ?? "").trim();
-        if (s) params.set("currency_price", s.includes(";") ? s : `${s};99999999`);
+        if (s) {
+          params.set(
+            "currency_price",
+            s.includes(";") ? s.replace(/\.000/g, "") : formatCurrencyPrice(s, null)
+          );
+        }
       }
       continue;
     }

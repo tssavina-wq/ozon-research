@@ -1,6 +1,8 @@
 // Pure parsers over Ozon's composer-api JSON. No browser, no network —
 // each function takes a composer-api response and returns plain data.
 
+import { parseHumanCount } from "./counts.js";
+
 /**
  * widgetStates keys look like "webPrice-3121879-default-1". Match by the exact widget NAME
  * (the part before the first "-"), so "webPrice" doesn't also match "webPriceDecreasedCompact".
@@ -1123,11 +1125,22 @@ export function parseSellerInfo(page) {
     null;
   const rating = ratingRaw ? parseFloat(String(ratingRaw).replace(",", ".")) : null;
 
+  // Badges often carry "20,6 K заказов" / "25,8 K отзывов"
+  let orders = null;
+  let reviewCount = null;
+  for (const b of badges) {
+    const t = String(b.label || "");
+    if (orders == null && /заказ/i.test(t)) orders = parseHumanCount(t);
+    if (reviewCount == null && /отзыв/i.test(t)) reviewCount = parseHumanCount(t);
+  }
+
   return {
     name,
     logo: w.logoImage?.backgroundImage || null,
     subtitle,
     rating: Number.isFinite(rating) ? rating : null,
+    orders,
+    reviewCount,
     badges,
     infoUrl: cleanUrl(w.action?.link),
     isExpress: /express/i.test(name || "") || /ozon-express/i.test(w.logoImage?.backgroundImage || ""),

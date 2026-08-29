@@ -16,7 +16,7 @@ MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru) (с
 
 | Tool | Назначение |
 |---|---|
-| `ozon_search` | Поиск (+ filters, dedupe, reviewTrust, page) |
+| `ozon_search` | Поиск (+ filters, seller min*, withDelivery, dedupe) |
 | `ozon_product_details` | Карточка (+ `extracted`, seller.isExpress) |
 | `ozon_product_reviews` | Отзывы (sort helpful/date/product, aboutProduct) |
 | `ozon_product_questions` | Вопросы и ответы на карточке |

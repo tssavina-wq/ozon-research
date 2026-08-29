@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Unit checks for live category parsers (no browser). */
-import { parseCatalogMenu, parseCategoryChild, parseSearchFilters } from "../src/parse.js";
+import { parseCatalogMenu, parseCategoryChild, parseSearchFilters, parseSellerInfo } from "../src/parse.js";
 import { categoryIdFromValue, categorySlugFromValue } from "../src/filters.js";
 import { compactFilters } from "../src/compact.js";
 
@@ -93,5 +93,23 @@ assert(
   compact.filters.find((f) => f.key === "category")?.options?.[0]?.slug === "noutbuki-15692",
   "compact keeps facet slug"
 );
+
+const sellerPage = {
+  widgetStates: {
+    "sellerTransparency-1-default-1": JSON.stringify({
+      title: { text: "Quorix" },
+      rating: { title: { text: "4.9" } },
+      badges: [
+        { text: "Premium" },
+        { text: "25,8 K отзывов" },
+        { text: "20,6 K заказов" },
+      ],
+    }),
+  },
+};
+const si = parseSellerInfo(sellerPage);
+assert(si.orders === 20600, "seller orders from badge");
+assert(si.reviewCount === 25800, "seller reviewCount from badge");
+assert(si.rating === 4.9, "seller rating");
 
 process.exit(failed ? 1 : 0);

@@ -141,7 +141,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.7.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.8.0" });
 
 server.registerTool(
   "ozon_search",
@@ -152,8 +152,9 @@ server.registerTool(
       "(+ reviewTrust / variantCount|configCount when >1). Pass compact:false or rich:true for full nested variants/configs/images. " +
       "Do NOT guess category slugs — call ozon_list_categories (or copy from ozon_search_filters / a real ozon.ru URL); " +
       "omit category for plain text search. " +
-      "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. Prefer limit 5–8 for shortlists. " +
-      "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
+      "Use priceMin/priceMax (enforced client-side), filters{}, excludeBrands, minReviews. " +
+      "For seller trust in ONE call: minSellerRating / minSellerOrders (+ withDelivery:true for PVZ dates). " +
+      "Prefer limit 5–8. Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
       query: z
         .string()
@@ -180,6 +181,26 @@ server.registerTool(
         .nonnegative()
         .optional()
         .describe("Drop items with fewer reviews than this"),
+      minSellerRating: z
+        .number()
+        .min(0)
+        .max(5)
+        .optional()
+        .describe("Min shop rating (enriches cards; slower)"),
+      minSellerOrders: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("Min shop orders from seller badge (shop-level, not SKU sales)"),
+      withDelivery: z
+        .boolean()
+        .optional()
+        .describe("Attach delivery.summary/best per item for current city"),
+      withSeller: z
+        .boolean()
+        .optional()
+        .describe("Attach seller{name,rating,orders,url} without min* filters"),
       dedupeVariants: z
         .boolean()
         .optional()
@@ -194,7 +215,7 @@ server.registerTool(
     },
     annotations: readOnly,
   },
-  tool("ozon_search", search)
+  tool("ozon_search", search, 120000)
 );
 
 server.registerTool(
@@ -336,7 +357,8 @@ server.registerTool(
     title: "Get Ozon seller profile",
     description:
       "Shop profile for a seller. Use when user asks 'is this seller trustworthy?' or before buying from unknown shop. " +
-      "Returns: shop name, logo, subtitle, rating (when present), badges with human labels (not only modal URLs), " +
+      "Returns: shop name, logo, subtitle, rating, orders + reviewCount (from badges like «20,6 K заказов»), " +
+      "badges with human labels, " +
       "infoUrl, isExpress/isOfficial hints. Product-card seller.rating is often richer than this page.",
     inputSchema: {
       seller: catalogId('Seller slug "dubaidutyfree", numeric id, or https://www.ozon.ru/seller/... URL'),
@@ -385,6 +407,10 @@ server.registerTool(
       filters: filtersSchema,
       excludeBrands: z.array(z.string()).optional(),
       minReviews: z.number().int().nonnegative().optional(),
+      minSellerRating: z.number().min(0).max(5).optional(),
+      minSellerOrders: z.number().int().nonnegative().optional(),
+      withDelivery: z.boolean().optional(),
+      withSeller: z.boolean().optional(),
       page: z.number().int().min(1).max(20).optional(),
       dedupeVariants: z.boolean().optional().describe("Collapse color variants (default true)"),
       dedupeConfigs: z.boolean().optional().describe("Collapse RAM/SSD configs (default true)"),
@@ -394,7 +420,7 @@ server.registerTool(
     },
     annotations: readOnly,
   },
-  tool("ozon_category_browse", categoryBrowse)
+  tool("ozon_category_browse", categoryBrowse, 120000)
 );
 
 server.registerTool(

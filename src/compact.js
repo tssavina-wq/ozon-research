@@ -43,6 +43,24 @@ export function compactSearchItem(it) {
   if (it.reviewTrust && it.reviewTrust !== "unknown") out.reviewTrust = it.reviewTrust;
   if (it.reviewsSharedAcrossModels) out.reviewsSharedAcrossModels = true;
   if (it.variantReviewPool) out.variantReviewPool = true;
+  if (it.seller) {
+    out.seller = dropUndef({
+      name: it.seller.name,
+      rating: it.seller.rating,
+      orders: it.seller.orders,
+      reviewCount: it.seller.reviewCount,
+      url: it.seller.url,
+      isOfficial: it.seller.isOfficial || undefined,
+      isExpress: it.seller.isExpress || undefined,
+    });
+  }
+  if (it.delivery) {
+    out.delivery = dropUndef({
+      summary: it.delivery.summary,
+      best: it.delivery.best,
+    });
+  }
+  if (it.location?.city) out.location = dropUndef({ city: it.location.city, region: it.location.region });
   // Only expose variant/config payloads when there are real siblings
   if ((it.variantCount || it.variants?.length || 0) > 1) {
     out.variantCount = it.variantCount || it.variants.length;
@@ -79,6 +97,8 @@ export function compactDetails(d) {
     ? dropUndef({
         name: d.seller.name,
         rating: d.seller.rating,
+        orders: d.seller.orders,
+        reviewCount: d.seller.reviewCount,
         url: d.seller.url,
         isExpress: d.seller.isExpress || undefined,
         isOfficial: d.seller.isOfficial || undefined,
