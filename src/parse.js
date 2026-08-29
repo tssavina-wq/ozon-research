@@ -2,6 +2,7 @@
 // each function takes a composer-api response and returns plain data.
 
 import { parseHumanCount } from "./counts.js";
+import { extractNutrition, looksFoodRelated } from "./nutrition.js";
 
 /**
  * widgetStates keys look like "webPrice-3121879-default-1". Match by the exact widget NAME
@@ -758,12 +759,19 @@ export function parseDetails(basePage, page2) {
 
   const characteristics = parseShortCharacteristics(basePage);
   const description = parseDescription(page2);
-  // Never feed description into extract — seller copy often cites rival GPUs.
-  const extracted = extractHardwareHints(heading?.title || basePage?.seo?.title, "", characteristics);
+  const name = heading?.title || basePage?.seo?.title || null;
+  // Never feed description into hardware extract — seller copy often cites rival GPUs.
+  const extracted = extractHardwareHints(name, "", characteristics);
+  const breadcrumbs = parseBreadcrumbs(basePage);
+  const nutrition = extractNutrition(characteristics, [name, description?.text]);
+  if (looksFoodRelated(name, characteristics, breadcrumbs) && nutrition.missing) {
+    nutrition.hint =
+      "No macros in short characteristics — call ozon_product_specs or pass enrichNutrition on details.";
+  }
 
   return {
     sku,
-    name: heading?.title || basePage?.seo?.title || null,
+    name,
     url,
     price: priceToNumber(price?.cardPrice) ?? priceToNumber(price?.price),
     priceRegular: priceToNumber(price?.price),
@@ -775,9 +783,11 @@ export function parseDetails(basePage, page2) {
     images: [...new Set(images)].slice(0, 10),
     characteristics,
     extracted: Object.keys(extracted).length ? extracted : undefined,
+    nutrition,
     description,
     location: parseLocation(basePage),
     delivery: null,
+    breadcrumbs,
   };
 }
 
@@ -1070,6 +1080,7 @@ export function parseSpecs(page) {
   const keys = Object.keys(characteristics);
   const totalCount = Number(w?.totalCount) || keys.length;
   const sparse = keys.length > 0 && keys.length < 8;
+  const nutrition = extractNutrition(characteristics, [w?.productTitle]);
   return {
     totalCount,
     fieldCount: keys.length,
@@ -1077,9 +1088,13 @@ export function parseSpecs(page) {
     specsIncomplete: sparse || keys.length === 0,
     productTitle: w?.productTitle || null,
     characteristics,
+    nutrition,
     note:
       keys.length < 8
-        ? "Seller left few specs on this listing; cross-check ozon_product_questions / title / other SKUs of the same model."
+        ? "Seller left few specs on this listing; cross-check ozon_product_questions / title / other SKUs of the same model." +
+          (nutrition.missing
+            ? " Macros often live only in richer tables — try another SKU of the same product."
+            : "")
         : null,
   };
 }

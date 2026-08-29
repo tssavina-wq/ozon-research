@@ -116,6 +116,22 @@ export async function fetchUrl(url, { retries = 1, method = "GET", body = undefi
   }
 }
 
+/** Binary download via Camoufox → { contentType, base64, byteLength }. */
+export async function fetchBytes(url, { retries = 1 } = {}) {
+  try {
+    return await call("fetch_bytes", { url, retries });
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (/exited|EPIPE|not writable|closed|destroyed/i.test(msg)) {
+      log("browser bridge lost, restarting…");
+      proc = null;
+      rl = null;
+      return call("fetch_bytes", { url, retries });
+    }
+    throw err;
+  }
+}
+
 export async function warmup() {
   ensureProcess();
   return call("warmup");

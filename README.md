@@ -17,12 +17,12 @@ MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru) (с
 | Tool | Назначение |
 |---|---|
 | `ozon_search` | Поиск (+ filters, seller min*, withDelivery, dedupe) |
-| `ozon_product_details` | Карточка (+ `extracted`, seller.isExpress) |
+| `ozon_product_details` | Карточка (+ `nutrition{}`, `imageDataUri`, delivery) |
 | `ozon_product_reviews` | Отзывы (sort helpful/date/product, aboutProduct) |
 | `ozon_product_questions` | Вопросы и ответы на карточке |
 | `ozon_product_offers` | Тот же товар у других продавцов (+ даты доставки, `location`) |
 | `ozon_product_variants` | Варианты (память, цвет, …) |
-| `ozon_product_specs` | Полные характеристики |
+| `ozon_product_specs` | Полные характеристики (+ `nutrition{}`) |
 | `ozon_compare_products` | Сравнение 2–8 товаров (матрица + extracted) |
 | `ozon_seller_info` | Профиль продавца |
 | `ozon_seller_catalog` | Каталог магазина |

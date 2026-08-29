@@ -141,7 +141,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.8.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.9.0" });
 
 server.registerTool(
   "ozon_search",
@@ -175,6 +175,12 @@ server.registerTool(
         .array(z.string())
         .optional()
         .describe('Drop brands/names containing these substrings, e.g. ["NoBrand"]'),
+      excludeContains: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Same as excludeBrands — use for food noise, e.g. ["корм","для кошек","для собак","тарелка"]'
+        ),
       minReviews: z
         .number()
         .int()
@@ -223,18 +229,34 @@ server.registerTool(
   {
     title: "Get Ozon product details",
     description:
-      "Product card. Default compact=true: price, seller, location, delivery summary, short characteristics " +
-      "(no image gallery / full description). compact:false or rich:true for images + full description. " +
-      "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews.",
+      "Product card. Default compact=true: price, seller, location, delivery, characteristics, " +
+      "nutrition{} (proteinG/carbsG/fatG/kcal/per — auto-loads features for food-like cards). " +
+      "imageDataUri:true → small Data URI thumbnail for canvases. " +
+      "compact:false / rich:true keeps images[] URLs + full description. For ALL specs: ozon_product_specs.",
     inputSchema: {
       product: productId.optional().describe("SKU, URL, or slug"),
       sku: z.string().min(1).optional().describe("Alias for product (same meaning)"),
+      enrichNutrition: z
+        .boolean()
+        .optional()
+        .describe("Default true: for food-like cards fetch features to fill nutrition{}"),
+      imageDataUri: z
+        .boolean()
+        .optional()
+        .describe("Fetch first image as data:<mime>;base64,… (wc200 by default)"),
+      imageSize: z
+        .number()
+        .int()
+        .min(50)
+        .max(500)
+        .optional()
+        .describe("Thumbnail edge for imageDataUri (default 200)"),
       compact: compactSchema,
       rich: richSchema,
     },
     annotations: readOnly,
   },
-  tool("ozon_product_details", withProductAlias(details))
+  tool("ozon_product_details", withProductAlias(details), 90000)
 );
 
 server.registerTool(
@@ -340,7 +362,8 @@ server.registerTool(
     title: "Get full Ozon product specifications",
     description:
       "Technical characteristics from the listing (fieldCount varies — many cards are sparse with <8 fields). " +
-      "When sparse/specsIncomplete=true, do not invent hardware numbers; use ozon_product_questions or another SKU of the same model. " +
+      "Also returns nutrition{} when macros are in the table. " +
+      "When sparse/specsIncomplete=true, do not invent numbers; try another SKU or ozon_product_questions. " +
       "More complete than ozon_product_details.characteristics when the seller filled the table.",
     inputSchema: {
       product: productId.optional(),
@@ -406,6 +429,10 @@ server.registerTool(
       priceMax: z.number().int().nonnegative().optional(),
       filters: filtersSchema,
       excludeBrands: z.array(z.string()).optional(),
+      excludeContains: z
+        .array(z.string())
+        .optional()
+        .describe('Name/brand substrings to drop, e.g. ["корм","для кошек"]'),
       minReviews: z.number().int().nonnegative().optional(),
       minSellerRating: z.number().min(0).max(5).optional(),
       minSellerOrders: z.number().int().nonnegative().optional(),

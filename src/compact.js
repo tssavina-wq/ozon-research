@@ -138,6 +138,9 @@ export function compactDetails(d) {
     delivery,
     characteristics: d.characteristics,
     extracted: d.extracted,
+    nutrition: d.nutrition,
+    imageDataUri: d.imageDataUri,
+    imageDataUriError: d.imageDataUriError,
     // omit images + full description in compact
     descriptionPreview: d.description?.text
       ? clipName(d.description.text.replace(/\s+/g, " "), 240)
@@ -162,6 +165,7 @@ export function compactCompare(result) {
       sparse: p.sparse || undefined,
       specsIncomplete: p.specsIncomplete || undefined,
       extracted: p.extracted,
+      nutrition: p.nutrition,
       error: p.error,
       // characteristics omitted — use matrix
     })

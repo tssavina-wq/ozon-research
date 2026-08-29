@@ -8,6 +8,7 @@ Stderr: logs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -169,6 +170,45 @@ class OzonBrowser:
             return json.loads(result["text"])
         except Exception:
             return result["text"]
+
+    async def fetch_bytes(self, url: str, retries: int = 1) -> dict:
+        """Download binary product image via Playwright request API → base64/dataUri."""
+        if not self._challenged:
+            await self.start()
+        async with self._lock:
+            self._reset_idle()
+            last_err: Exception | None = None
+            for attempt in range(retries + 1):
+                try:
+                    resp = await self._page.context.request.get(url, timeout=30000)
+                    status = resp.status
+                    if status != 200:
+                        raise RuntimeError(f"image fetch HTTP {status}")
+                    body = await resp.body()
+                    ctype = (resp.headers.get("content-type") or "application/octet-stream").split(";")[0].strip()
+                    if len(body) > 250_000:
+                        return {
+                            "contentType": ctype,
+                            "base64": None,
+                            "dataUri": None,
+                            "byteLength": len(body),
+                            "tooLarge": True,
+                        }
+                    b64 = base64.b64encode(body).decode("ascii")
+                    mime = ctype or "application/octet-stream"
+                    return {
+                        "contentType": mime,
+                        "base64": b64,
+                        "dataUri": f"data:{mime};base64,{b64}",
+                        "byteLength": len(body),
+                    }
+                except Exception as err:  # noqa: BLE001
+                    last_err = err
+                    if attempt < retries:
+                        log("fetch_bytes failed, retrying:", err)
+                        continue
+                    raise
+            raise RuntimeError(str(last_err or "fetch_bytes failed"))
 
     async def fetch_url(
         self,
@@ -396,6 +436,9 @@ async def handle_commands() -> None:
                     method=req.get("method") or "GET",
                     body=req.get("body"),
                 )
+                respond({"id": req_id, "ok": True, "data": data})
+            elif cmd == "fetch_bytes":
+                data = await browser.fetch_bytes(req["url"], retries=int(req.get("retries", 1)))
                 respond({"id": req_id, "ok": True, "data": data})
             elif cmd == "warmup":
                 await browser.start()

@@ -1,5 +1,5 @@
 // High-level Ozon operations: build composer-api paths, fetch via the browser, parse to plain data.
-import { fetchJson, fetchUrl, getLocation, searchCities, setCity } from "./browser.js";
+import { fetchJson, fetchUrl, fetchBytes, getLocation, searchCities, setCity } from "./browser.js";
 import {
   parseSearch,
   parseDetails,
@@ -26,6 +26,7 @@ import {
 } from "./parse.js";
 import { wantCompact, applyCompact } from "./compact.js";
 import { formatCurrencyPrice } from "./counts.js";
+import { extractNutrition, looksFoodRelated, thumbnailUrl } from "./nutrition.js";
 import {
   filtersNeedResolve,
   resolveFilterTitles,
@@ -323,6 +324,7 @@ function finalizeItems(
     dedupeVariants = true,
     dedupeConfigs = true,
     excludeBrands = [],
+    excludeContains = [],
     minReviews,
     priceMin,
     priceMax,
@@ -338,7 +340,12 @@ function finalizeItems(
     const max = Number(priceMax);
     items = items.filter((it) => it.price == null || it.price <= max);
   }
-  const exclude = (excludeBrands || []).map((b) => String(b).toLowerCase().trim()).filter(Boolean);
+  const exclude = [
+    ...(excludeBrands || []),
+    ...(excludeContains || []),
+  ]
+    .map((b) => String(b).toLowerCase().trim())
+    .filter(Boolean);
   if (exclude.length) {
     items = items.filter((it) => {
       const brand = String(it.brand || "").toLowerCase();
@@ -489,6 +496,7 @@ export async function search({
   dedupeVariants = true,
   dedupeConfigs = true,
   excludeBrands,
+  excludeContains,
   minReviews,
   minSellerRating,
   minSellerOrders,
@@ -555,6 +563,7 @@ export async function search({
     dedupeVariants,
     dedupeConfigs,
     excludeBrands,
+    excludeContains,
     minReviews,
     priceMin,
     priceMax,
@@ -614,13 +623,42 @@ export async function search({
   return maybeCompact("search", out, { compact, rich });
 }
 
-export async function details({ product, compact, rich } = {}) {
+export async function details({
+  product,
+  compact,
+  rich,
+  enrichNutrition = true,
+  imageDataUri = false,
+  imageSize = 200,
+} = {}) {
   const path = productPath(product);
   const [basePage, page2] = await Promise.all([
     fetchJson(path),
     fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`),
   ]);
   const d = parseDetails(basePage, page2);
+
+  // Food/sports-nutrition cards often hide macros on the features table only
+  if (
+    enrichNutrition &&
+    d.nutrition?.missing &&
+    looksFoodRelated(d.name, d.characteristics, d.breadcrumbs)
+  ) {
+    try {
+      const features = await fetchJson(`${path}features/`);
+      const full = parseSpecs(features);
+      d.characteristics = { ...(d.characteristics || {}), ...(full.characteristics || {}) };
+      d.nutrition = extractNutrition(d.characteristics, [d.name, d.description?.text]);
+      d.nutrition.enrichedFromSpecs = true;
+      if (full.sparse != null) d.specsSparse = full.sparse;
+    } catch (err) {
+      d.nutrition = {
+        ...(d.nutrition || {}),
+        enrichError: err?.message || String(err),
+      };
+    }
+  }
+
   try {
     const raw = await fetchAsyncWidget(basePage, "webDelivery");
     const delivery = parseDelivery(raw);
@@ -635,6 +673,28 @@ export async function details({ product, compact, rich } = {}) {
       error: err?.message || String(err),
     };
   }
+
+  if (imageDataUri && d.images?.[0]) {
+    const src = thumbnailUrl(d.images[0], imageSize) || d.images[0];
+    try {
+      const bin = await fetchBytes(src);
+      if (bin.tooLarge) {
+        d.imageDataUriError = `image too large (${bin.byteLength} bytes); try imageSize=100`;
+      } else if (bin.dataUri) {
+        d.imageDataUri = bin.dataUri;
+        d.imageDataUriSource = src;
+      } else if (bin.base64) {
+        const mime = String(bin.contentType || "image/jpeg").split(";")[0].trim() || "image/jpeg";
+        d.imageDataUri = `data:${mime};base64,${bin.base64}`;
+        d.imageDataUriSource = src;
+      } else {
+        d.imageDataUriError = "empty image payload";
+      }
+    } catch (err) {
+      d.imageDataUriError = err?.message || String(err);
+    }
+  }
+
   return maybeCompact("details", d, { compact, rich });
 }
 
@@ -770,6 +830,7 @@ export async function categoryBrowse({
   dedupeVariants = true,
   dedupeConfigs = true,
   excludeBrands,
+  excludeContains,
   minReviews,
   minSellerRating,
   minSellerOrders,
@@ -825,6 +886,7 @@ export async function categoryBrowse({
     dedupeVariants,
     dedupeConfigs,
     excludeBrands,
+    excludeContains,
     minReviews,
     priceMin,
     priceMax,
@@ -927,6 +989,7 @@ export async function compareProducts({ products, compact, rich }) {
     const characteristics = { ...short, ...full };
     const extracted =
       extractHardwareHints(d.name, "", characteristics) || d.extracted;
+    const nutrition = extractNutrition(characteristics, [d.name, d.description?.text]);
     return {
       sku: d.sku || skuHint,
       name: d.name,
@@ -944,6 +1007,7 @@ export async function compareProducts({ products, compact, rich }) {
         Object.keys(characteristics).length === 0 || Object.keys(characteristics).length < 8,
       characteristics,
       extracted: Object.keys(extracted || {}).length ? extracted : undefined,
+      nutrition,
       error: null,
     };
   }
@@ -990,7 +1054,7 @@ export async function compareProducts({ products, compact, rich }) {
     matrix,
     missingKeysByProduct,
     note: rows.some((r) => r.sparse || r.specsIncomplete)
-      ? "Some listings have sparse specs — check extracted{} (title/characteristics only; GPU never from description) and prefer another SKU of the same model."
+      ? "Some listings have sparse specs — check extracted{} / nutrition{} and prefer another SKU of the same model."
       : null,
   };
   return maybeCompact("compare", out, { compact, rich });
