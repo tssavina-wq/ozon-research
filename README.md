@@ -27,6 +27,7 @@ MCP-сервер для маркетплейса [Ozon](https://www.ozon.ru) (с
 | `ozon_seller_info` | Профиль продавца |
 | `ozon_seller_catalog` | Каталог магазина |
 | `ozon_category_browse` | Товары в категории (+ filters, dedupe) |
+| `ozon_list_categories` | Живое дерево категорий (title + slug, без хардкода) |
 | `ozon_brand_catalog` | Витрина бренда (+ `filters`) |
 | `ozon_related_products` | «Покупают вместе» / похожие |
 | `ozon_search_filters` | Доступные фильтры поиска |
@@ -53,7 +54,14 @@ ozon_product_offers({ product: sku })  → даты для выбранного 
 
 - **Товар:** SKU, URL `https://www.ozon.ru/product/...` или slug  
 - **Продавец / категория / бренд:** slug, numeric id или полный URL  
-- **Категория:** только реальный slug из `ozon_search_filters` или ozon.ru — Ozon смотрит на numeric id, префикс вроде `myshi-15721` может открыть чужую категорию
+- **Категория:** только реальный slug из `ozon_list_categories` / `ozon_search_filters` или ozon.ru — Ozon смотрит на numeric id, угаданный префикс может открыть чужую категорию
+
+```
+ozon_list_categories()                    → топ-отделы
+ozon_list_categories({ parent: "…" })     → дети
+ozon_list_categories({ query: "…" })      → категории по поисковому запросу
+ozon_category_browse({ category: slug })  → товары
+```
 
 ## Быстрый старт
 

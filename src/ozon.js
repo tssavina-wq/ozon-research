@@ -14,6 +14,8 @@ import {
   parseBrandCatalog,
   parseRelatedProducts,
   parseSearchFilters,
+  parseCatalogMenu,
+  parseCategoryChild,
   dedupeSearchItems,
   annotateReviewTrust,
   modelKey,
@@ -29,6 +31,7 @@ import {
   serializeFilters,
   mergeFilterParams,
   looksResolvedFilterValue,
+  categoryIdFromValue,
 } from "./filters.js";
 import { _internal } from "./parse.js";
 
@@ -823,6 +826,108 @@ export async function compareProducts({ products, compact, rich }) {
       : null,
   };
   return maybeCompact("compare", out, { compact, rich });
+}
+
+const CATEGORY_CHILD_V3 =
+  "https://www.ozon.ru/api/composer-api.bx/_action/v2/categoryChildV3";
+
+async function loadCatalogMenu() {
+  const page = await fetchJson("/");
+  const menu = parseCatalogMenu(page);
+  if (!menu.menuId || !menu.categories.length) {
+    throw new Error("catalog menu not available from Ozon homepage");
+  }
+  return menu;
+}
+
+/**
+ * Live category directory (no hardcoded slugs).
+ * - no args → top departments from homepage catalogMenu
+ * - parent → children via categoryChildV3 (parent = slug, id, URL, or title)
+ * - query → category facet from search (title + slug for that query)
+ */
+export async function listCategories({ parent, query, limit = 60, compact, rich } = {}) {
+  const lim = Math.min(Math.max(Number(limit) || 60, 1), 120);
+
+  if (query && String(query).trim()) {
+    const url = `/search/?text=${encodeURIComponent(String(query).trim())}&from_global=true`;
+    const page = await fetchJson(url);
+    const parsed = parseSearchFilters(page, String(query).trim());
+    const categories = (parsed.categories || []).filter((c) => c.slug).slice(0, lim);
+    return maybeCompact(
+      "categories",
+      {
+        query: String(query).trim(),
+        count: categories.length,
+        categories,
+        note:
+          categories.length === 0
+            ? "No category facet for this query — try ozon_list_categories without args, then drill with parent."
+            : "Copy slug into ozon_category_browse / ozon_search.category — do not invent stems.",
+      },
+      { compact, rich }
+    );
+  }
+
+  const menu = await loadCatalogMenu();
+
+  if (!parent || !String(parent).trim()) {
+    return maybeCompact(
+      "categories",
+      {
+        level: "root",
+        menuId: menu.menuId,
+        count: menu.categories.length,
+        categories: menu.categories.slice(0, lim),
+        note: "Top departments. Pass parent=slug (or title/id) to list children.",
+      },
+      { compact, rich }
+    );
+  }
+
+  const raw = String(parent).trim();
+  let categoryId = categoryIdFromValue(raw);
+  let matched = null;
+
+  if (!categoryId) {
+    matched = menu.categories.find(
+      (c) =>
+        c.title &&
+        (c.title.toLowerCase() === raw.toLowerCase() ||
+          c.slug?.toLowerCase() === raw.toLowerCase())
+    );
+    if (matched) categoryId = matched.id || categoryIdFromValue(matched.slug);
+  } else {
+    matched = menu.categories.find((c) => c.id === categoryId || categoryIdFromValue(c.slug) === categoryId);
+  }
+
+  if (!categoryId) {
+    throw new Error(
+      `unknown category parent "${raw}" — use a slug/id from ozon_list_categories() or a title of a top department`
+    );
+  }
+
+  const childUrl = `${CATEGORY_CHILD_V3}?menuId=${encodeURIComponent(menu.menuId)}&categoryId=${encodeURIComponent(categoryId)}`;
+  const payload = await fetchUrl(childUrl);
+  const parsed = parseCategoryChild(payload, { limit: lim });
+  if (matched && !parsed.parent.title) {
+    parsed.parent = { ...parsed.parent, ...matched, id: categoryId };
+  } else if (!parsed.parent.id) {
+    parsed.parent = { ...parsed.parent, id: categoryId };
+  }
+
+  return maybeCompact(
+    "categories",
+    {
+      level: "child",
+      menuId: menu.menuId,
+      parent: parsed.parent,
+      count: parsed.count,
+      categories: parsed.categories,
+      note: "Copy slug into ozon_category_browse / ozon_search.category — do not invent stems.",
+    },
+    { compact, rich }
+  );
 }
 
 export async function searchFilters({ query, category, compact, rich } = {}) {

@@ -1186,15 +1186,28 @@ function parseFilterOption(item) {
   };
 }
 
+function categorySlugFromLink(link) {
+  const path = cleanUrl(link) || String(link || "");
+  const m = path.match(/\/category\/([^/?#]+)/i);
+  return m ? m[1] : null;
+}
+
+function mapCategoryOption(c) {
+  const url = cleanUrl(c.urlValue || c.url || c.link) || null;
+  const slug = categorySlugFromLink(url || c.urlValue || c.url);
+  return {
+    title: c.title || null,
+    slug,
+    url,
+    active: Boolean(c.isActive || c.active),
+  };
+}
+
 function parseFilterEntry(f) {
   const entry = { key: f.key, type: f.type };
   if (f.categoryFilter) {
     entry.title = f.categoryFilter.title;
-    entry.options = (f.categoryFilter.categories || []).map((c) => ({
-      title: c.title,
-      url: cleanUrl(c.urlValue),
-      active: Boolean(c.isActive),
-    }));
+    entry.options = (f.categoryFilter.categories || []).map(mapCategoryOption);
   } else if (f.boolFilter) {
     entry.title = f.boolFilter.title;
     entry.type = "boolean";
@@ -1253,7 +1266,71 @@ export function parseSearchFilters(page, query) {
     selected: o.isSelected === "True" || o.isSelected === true,
   }));
 
-  return { query, filters, activeFilters, sortOptions };
+  const categoryFacet = filters.find((f) => f.key === "category");
+  const categories = (categoryFacet?.options || []).filter((o) => o.slug || o.url);
+
+  return { query, filters, categories, activeFilters, sortOptions };
+}
+
+/** Top-level departments from homepage catalogMenu (live, not hardcoded). */
+export function parseCatalogMenu(page) {
+  const w = widget(page, "catalogMenu");
+  const categories = (w?.categories || [])
+    .map((c) => {
+      const url = cleanUrl(c.url) || (c.url ? String(c.url) : null);
+      const slug = categorySlugFromLink(url || c.url);
+      return {
+        id: c.id != null ? String(c.id) : null,
+        title: c.title || null,
+        slug,
+        url,
+      };
+    })
+    .filter((c) => c.title && (c.slug || c.id));
+  return {
+    menuId: w?.menuId != null ? String(w.menuId) : null,
+    count: categories.length,
+    categories,
+  };
+}
+
+/** Flatten categoryChildV3 response into title/slug tree (one nesting level of groups). */
+export function parseCategoryChild(payload, { limit = 80 } = {}) {
+  const data = payload?.data || payload || {};
+  const parentUrl = cleanUrl(data.url) || data.url || null;
+  const parent = {
+    id: data.id != null ? String(data.id) : null,
+    title: data.title || null,
+    slug: categorySlugFromLink(parentUrl || data.url),
+    url: parentUrl,
+  };
+
+  const categories = [];
+  for (const col of data.columns || []) {
+    for (const c of col.categories || []) {
+      const url = cleanUrl(c.url) || c.url || null;
+      const node = {
+        title: c.title || null,
+        slug: categorySlugFromLink(url || c.url),
+        url,
+        children: (c.categories || [])
+          .map((sub) => {
+            const su = cleanUrl(sub.url) || sub.url || null;
+            return {
+              title: sub.title || null,
+              slug: categorySlugFromLink(su || sub.url),
+              url: su,
+            };
+          })
+          .filter((x) => x.title && (x.slug || x.url)),
+      };
+      if (node.title && (node.slug || node.url)) categories.push(node);
+      if (categories.length >= limit) break;
+    }
+    if (categories.length >= limit) break;
+  }
+
+  return { parent, count: categories.length, categories };
 }
 
 export const _internal = {

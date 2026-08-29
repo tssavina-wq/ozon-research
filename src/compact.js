@@ -8,18 +8,8 @@ export function wantCompact(args = {}) {
 
 const NAME_MAX = 140;
 const FILTER_OPTIONS_MAX = 16;
-const FILTER_PRIORITY = new Set([
-  "brand",
-  "category",
-  "gpuname",
-  "cpuname",
-  "ramtype",
-  "ramclockfrequency",
-  "singleramsize",
-  "numbundleinteger",
-  "is_promo",
-  "delivery",
-]);
+/** Facets agents usually need first — brand/category/price only (no domain-specific hardcodes). */
+const FILTER_PRIORITY = new Set(["brand", "category", "currency_price", "is_promo", "delivery"]);
 
 export function clipName(name, max = NAME_MAX) {
   const s = String(name || "");
@@ -177,6 +167,9 @@ export function compactFilters(result) {
       dropUndef({
         key: o.key,
         title: o.title,
+        // Category facets need slug/url — without them agents invent wrong stems
+        slug: o.slug,
+        url: o.url,
         active: o.active || undefined,
         count: o.count,
       })
@@ -192,21 +185,45 @@ export function compactFilters(result) {
   });
   // Prefer priority filters first, then others
   filters.sort((a, b) => Number(FILTER_PRIORITY.has(b.key)) - Number(FILTER_PRIORITY.has(a.key)));
+  const categories = Array.isArray(result.categories)
+    ? result.categories.slice(0, FILTER_OPTIONS_MAX).map((c) =>
+        dropUndef({
+          title: c.title,
+          slug: c.slug,
+          url: c.url,
+          active: c.active || undefined,
+          children: Array.isArray(c.children)
+            ? c.children.slice(0, 12).map((ch) =>
+                dropUndef({ title: ch.title, slug: ch.slug, url: ch.url })
+              )
+            : undefined,
+        })
+      )
+    : undefined;
   return dropUndef({
     compact: true,
     query: result.query,
+    parent: result.parent,
+    menuId: result.menuId,
+    level: result.level,
+    count: result.count,
+    categories,
     filters,
     activeFilters: result.activeFilters,
     sortOptions: result.sortOptions,
-    note: truncatedNote(filters),
+    note: truncatedNote(filters, categories, result),
   });
 }
 
-function truncatedNote(filters) {
+function truncatedNote(filters, categories, result) {
+  const parts = [];
   if (filters.some((f) => f.optionsTruncated)) {
-    return "Facet options truncated (compact). Pass compact:false for full filter lists.";
+    parts.push("Facet options truncated (compact). Pass compact:false for full filter lists.");
   }
-  return undefined;
+  if (Array.isArray(result.categories) && categories && result.categories.length > categories.length) {
+    parts.push("Category list truncated (compact). Pass compact:false for full tree.");
+  }
+  return parts.length ? parts.join(" ") : undefined;
 }
 
 export function compactOffers(result) {
@@ -281,6 +298,7 @@ export function applyCompact(kind, result) {
     case "compare":
       return compactCompare(result);
     case "filters":
+    case "categories":
       return compactFilters(result);
     case "offers":
       return compactOffers(result);

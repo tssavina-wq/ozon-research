@@ -83,12 +83,33 @@ ok(cmp.matrix.X.a === "1", "matrix kept");
 
 const filters = compactFilters({
   query: "q",
+  categories: [
+    {
+      title: "Cat",
+      slug: "cat-1",
+      url: "https://www.ozon.ru/category/cat-1/",
+      children: [{ title: "Sub", slug: "sub-2", url: "/category/sub-2/" }],
+    },
+  ],
   filters: [
     {
       key: "brand",
       type: "checkbox",
       title: "Бренд",
       options: Array.from({ length: 40 }, (_, i) => ({ key: String(i), title: `B${i}` })),
+    },
+    {
+      key: "category",
+      type: "category",
+      title: "Категория",
+      options: [
+        {
+          title: "Laptops",
+          slug: "noutbuki-15692",
+          url: "https://www.ozon.ru/category/noutbuki-15692/",
+          active: true,
+        },
+      ],
     },
     {
       key: "obscure",
@@ -101,5 +122,10 @@ const filters = compactFilters({
 ok(filters.filters[0].optionsTruncated === true, "brand options truncated");
 ok(filters.filters[0].optionCount === 40, "optionCount preserved");
 ok(filters.filters[0].options.length <= 16, "brand options capped");
+const catFacet = filters.filters.find((f) => f.key === "category");
+ok(catFacet?.options?.[0]?.slug === "noutbuki-15692", "category slug kept in compact");
+ok(catFacet?.options?.[0]?.url?.includes("noutbuki-15692"), "category url kept in compact");
+ok(filters.categories?.[0]?.slug === "cat-1", "top-level categories kept");
+ok(filters.categories?.[0]?.children?.[0]?.slug === "sub-2", "category children slugs kept");
 
 process.exit(failed ? 1 : 0);

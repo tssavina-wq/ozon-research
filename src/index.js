@@ -20,6 +20,7 @@ import {
   relatedProducts,
   compareProducts,
   searchFilters,
+  listCategories,
   location,
   searchCitiesTool,
   setLocation,
@@ -87,11 +88,10 @@ const filtersSchema = z
   )
   .optional()
   .describe(
-    'Facet filters from ozon_search_filters. Examples: {"brand":"100867541"}, ' +
-      '{"brand":"ATTACK SHARK"}, {"brand":["100867541","26303256"]}, ' +
-      '{"mouseconnection":279146,"is_promo":true}, ' +
-      '{"maxamplificationmouse":{"min":18000,"max":50000}}, ' +
-      '{"category":"besprovodnye-myshi-31940"}. Titles are resolved to keys when needed.'
+    'Facet filters from ozon_search_filters. Examples: {"brand":"<id>"}, ' +
+      '{"brand":"Brand Title"}, {"brand":["<id1>","<id2>"]}, ' +
+      '{"is_promo":true}, {"<rangeFacet>":{"min":0,"max":10000}}, ' +
+      '{"category":"<slug-id from ozon_list_categories>"}. Titles resolve to keys when needed.'
   );
 
 const readOnly = { readOnlyHint: true, openWorldHint: true, idempotentHint: true };
@@ -141,7 +141,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.6.1" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.7.0" });
 
 server.registerTool(
   "ozon_search",
@@ -150,7 +150,8 @@ server.registerTool(
     description:
       "Entry point for product discovery on ozon.ru. Default compact=true: sku, name, price, rating, reviews, brand, url " +
       "(+ reviewTrust / variantCount|configCount when >1). Pass compact:false or rich:true for full nested variants/configs/images. " +
-      "Do NOT guess category slugs — copy from ozon_search_filters or a real ozon.ru URL; omit category for plain text search. " +
+      "Do NOT guess category slugs — call ozon_list_categories (or copy from ozon_search_filters / a real ozon.ru URL); " +
+      "omit category for plain text search. " +
       "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. Prefer limit 5–8 for shortlists. " +
       "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
@@ -158,12 +159,12 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe('Keywords, e.g. "Steam Deck OLED", "iphone 15". Optional if category or filters.category set.'),
+        .describe("Keywords for product search. Optional if category or filters.category set."),
       category: z
         .string()
         .min(1)
         .optional()
-        .describe("Category slug like igrovye-noutbuki-15821 — prefer over guessing inside filters"),
+        .describe("Exact category slug from ozon_list_categories / filters — never invent the stem"),
       sort: sortSchema.describe("popular | price | price_desc | rating | new | discount"),
       priceMin: z.number().int().nonnegative().optional().describe("Minimum price in rubles"),
       priceMax: z.number().int().nonnegative().optional().describe("Maximum price in rubles"),
@@ -172,7 +173,7 @@ server.registerTool(
       excludeBrands: z
         .array(z.string())
         .optional()
-        .describe('Drop brands/names containing these substrings, e.g. ["Neobihier"]'),
+        .describe('Drop brands/names containing these substrings, e.g. ["NoBrand"]'),
       minReviews: z
         .number()
         .int()
@@ -371,13 +372,13 @@ server.registerTool(
   {
     title: "Browse Ozon category",
     description:
-      "Products inside a category without text search. Use for 'show smartphones under 30k' via category + priceMax, " +
-      "or browsing a department. Returns products, breadcrumbs, top brands in category. " +
-      "IMPORTANT: Ozon matches the numeric id only — a hallucinated slug like myshi-15721 can silently open " +
-      "videokarty-15721. Always copy the slug from ozon_search_filters (active category URL) or a real ozon.ru link. " +
+      "Products inside a category without text search. Use for browsing a department with priceMax/filters. " +
+      "Returns products, breadcrumbs, top brands. " +
+      "IMPORTANT: Ozon matches the numeric id only — a guessed stem+id can open a different category. " +
+      "Always copy slug from ozon_list_categories (or ozon_search_filters / real ozon.ru link). " +
       "Mismatch of text prefix vs real category → error. Supports filters{} like ozon_search.",
     inputSchema: {
-      category: catalogId("Exact category slug from filters/URL, e.g. besprovodnye-myshi-31940 — not a guessed name-id"),
+      category: catalogId("Exact category slug from ozon_list_categories — not a guessed name-id"),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
@@ -401,11 +402,11 @@ server.registerTool(
   {
     title: "Browse Ozon brand store",
     description:
-      "Official brand storefront on Ozon (Apple, Samsung, Baseus, etc.). " +
-      "Accepts brand name (\"Baseus\"), slug-id (\"apple-26303000\"), or /brand/... URL. " +
+      "Official brand storefront on Ozon. " +
+      "Accepts brand name, slug-id (\"name-123\"), or /brand/... URL. " +
       "Plain names are resolved via Ozon search. Returns brand products (ads filtered out). Supports filters{}.",
     inputSchema: {
-      brand: catalogId('Brand name "Baseus", slug-id "apple-26303000", or https://www.ozon.ru/brand/... URL'),
+      brand: catalogId('Brand name, slug-id "name-123", or https://www.ozon.ru/brand/... URL'),
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
@@ -467,21 +468,49 @@ server.registerTool(
     title: "Get Ozon search filters",
     description:
       "Available filters and sort options BEFORE / alongside searching. Default compact=true truncates long facet option lists " +
-      "(keeps brand/category/GPU/CPU fuller). Pass compact:false for complete options. " +
-      "Does not return products.",
+      "(keeps brand/category/price fuller; category options include slug+url). Pass compact:false for complete options. " +
+      "For browsing the category tree use ozon_list_categories. Does not return products.",
     inputSchema: {
-      query: z.string().min(1).optional().describe('Search text, e.g. "iphone 15" (optional if category set)'),
+      query: z.string().min(1).optional().describe("Search text (optional if category set)"),
       category: z
         .string()
         .min(1)
         .optional()
-        .describe("Category slug to list facets for, e.g. besprovodnye-myshi-31940"),
+        .describe("Category slug from ozon_list_categories to list facets for"),
       compact: compactSchema,
       rich: richSchema,
     },
     annotations: readOnly,
   },
   tool("ozon_search_filters", searchFilters)
+);
+
+server.registerTool(
+  "ozon_list_categories",
+  {
+    title: "List Ozon categories",
+    description:
+      "Live category directory from Ozon (not a hardcoded map). Returns title + slug + url. " +
+      "No args → top departments. parent=slug|id|title → children. query=text → category facet for that search. " +
+      "Copy slug into ozon_category_browse / ozon_search.category — never invent stems.",
+    inputSchema: {
+      parent: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Parent category slug, numeric id, URL, or top-level title to list children"),
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Search text — return categories Ozon associates with this query"),
+      limit: limitSchema(120, 60),
+      compact: compactSchema,
+      rich: richSchema,
+    },
+    annotations: readOnly,
+  },
+  tool("ozon_list_categories", listCategories)
 );
 
 server.registerTool(

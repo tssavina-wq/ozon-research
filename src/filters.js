@@ -3,11 +3,11 @@
 /**
  * filters shape:
  * {
- *   brand: "100867541" | "ATTACK SHARK" | ["100867541", "26303256"],
+ *   brand: "100867541" | "Brand Title" | ["100867541", "26303256"],
  *   is_promo: true,
- *   mouseconnection: 279146,
- *   maxamplificationmouse: { min: 18000, max: 50000 },
- *   category: "besprovodnye-myshi-31940" | category URL | title
+ *   <facetKey>: optionKey | title | [keys],
+ *   <rangeFacet>: { min, max },
+ *   category: "slug-id" | category URL | title  // from ozon_list_categories / filters
  * }
  *
  * Ozon encoding:
@@ -53,7 +53,8 @@ export function filtersNeedResolve(filters) {
   return false;
 }
 
-function categorySlugFromValue(raw) {
+/** Extract category slug (or numeric id) from slug / path / URL. Titles → null. */
+export function categorySlugFromValue(raw) {
   const s = String(raw ?? "").trim();
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) {
@@ -70,6 +71,15 @@ function categorySlugFromValue(raw) {
   }
   if (/^[a-z0-9-]+-\d+$/i.test(s) || /^\d+$/.test(s)) return s;
   return null;
+}
+
+/** Numeric category id from slug-id / path / bare digits. */
+export function categoryIdFromValue(raw) {
+  const slug = categorySlugFromValue(raw) || String(raw ?? "").trim();
+  if (!slug) return null;
+  if (/^\d+$/.test(slug)) return slug;
+  const m = slug.match(/-(\d+)$/);
+  return m ? m[1] : null;
 }
 
 /**
