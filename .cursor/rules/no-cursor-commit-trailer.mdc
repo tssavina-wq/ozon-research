@@ -1,0 +1,12 @@
+---
+description: No Cursor co-author trailers in git commits
+alwaysApply: true
+---
+
+# Git commits
+
+Never add `Co-authored-by: Cursor` or any Cursor/AI attribution trailer to commits.
+
+When committing, avoid `git commit` if the environment injects that trailer — use `git commit-tree` + `git update-ref` (or equivalent) so the message is exactly what was written.
+
+Do not rewrite already-pushed history to strip trailers unless the user explicitly asks for a force-push rewrite.
