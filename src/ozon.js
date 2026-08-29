@@ -26,7 +26,7 @@ import {
 } from "./parse.js";
 import { wantCompact, applyCompact } from "./compact.js";
 import { formatCurrencyPrice } from "./counts.js";
-import { extractNutrition, looksFoodRelated, thumbnailUrl } from "./nutrition.js";
+import { extractNutrition, looksFoodRelated, thumbnailUrl, FOOD_SEARCH_NOISE } from "./nutrition.js";
 import {
   filtersNeedResolve,
   resolveFilterTitles,
@@ -325,6 +325,7 @@ function finalizeItems(
     dedupeConfigs = true,
     excludeBrands = [],
     excludeContains = [],
+    foodOnly = false,
     minReviews,
     priceMin,
     priceMax,
@@ -343,6 +344,7 @@ function finalizeItems(
   const exclude = [
     ...(excludeBrands || []),
     ...(excludeContains || []),
+    ...(foodOnly ? FOOD_SEARCH_NOISE : []),
   ]
     .map((b) => String(b).toLowerCase().trim())
     .filter(Boolean);
@@ -491,12 +493,14 @@ export async function search({
   priceMin,
   priceMax,
   page = 1,
+  pages = 1,
   filters,
   limit = 8,
   dedupeVariants = true,
   dedupeConfigs = true,
   excludeBrands,
   excludeContains,
+  foodOnly = false,
   minReviews,
   minSellerRating,
   minSellerOrders,
@@ -511,6 +515,8 @@ export async function search({
   const q = query ? String(query).trim() : undefined;
   const enrich =
     minSellerRating != null || minSellerOrders != null || withDelivery || withSeller;
+  const pageCount = Math.min(Math.max(Number(pages) || 1, 1), 5);
+  const startPage = Math.max(Number(page) || 1, 1);
   const fetchLimit = Math.min(
     36,
     Math.max(limit * (enrich ? 5 : dedupeVariants || dedupeConfigs ? 3 : 1), limit)
@@ -522,14 +528,14 @@ export async function search({
     sort,
     priceMin,
     priceMax,
-    page,
+    page: startPage,
     filters,
   });
   let pageData = await fetchJson(built.url);
   if (built.category) assertCategorySlug(built.category, pageData);
 
   let sortUsed = sort;
-  let parsed = parseSearch(pageData, fetchLimit);
+  let parsed = parseSearch(pageData, 36);
   let note = null;
 
   // Ozon "popular" (no sorting) is often empty or ads-only with filters — try organic sorts.
@@ -541,11 +547,11 @@ export async function search({
         sort: altSort,
         priceMin,
         priceMax,
-        page,
+        page: startPage,
         filters: built.appliedFilters,
       });
       const altPage = await fetchJson(alt.url);
-      const altParsed = parseSearch(altPage, fetchLimit);
+      const altParsed = parseSearch(altPage, 36);
       if (altParsed.count > 0 && !altParsed.sponsoredOnly) {
         pageData = altPage;
         parsed = altParsed;
@@ -558,12 +564,42 @@ export async function search({
     }
   }
 
+  // Extra pages for large shortlists (e.g. 40 items)
+  if (pageCount > 1) {
+    const merged = [...(parsed.items || [])];
+    const seen = new Set(merged.map((it) => it.sku).filter(Boolean));
+    for (let p = startPage + 1; p < startPage + pageCount; p++) {
+      const moreUrl = await buildCatalogUrl({
+        query: q,
+        category: built.category || category,
+        sort: sortUsed,
+        priceMin,
+        priceMax,
+        page: p,
+        filters: built.appliedFilters,
+      });
+      const morePage = await fetchJson(moreUrl.url);
+      const moreParsed = parseSearch(morePage, 36);
+      for (const it of moreParsed.items || []) {
+        if (!it.sku || seen.has(it.sku)) continue;
+        seen.add(it.sku);
+        merged.push(it);
+      }
+    }
+    parsed = {
+      count: merged.length,
+      items: merged,
+      sponsoredOnly: parsed.sponsoredOnly,
+    };
+  }
+
   const finalized = finalizeItems(parsed, {
-    limit: enrich ? fetchLimit : limit,
+    limit: enrich ? Math.min(36, Math.max(fetchLimit, limit * 3)) : limit,
     dedupeVariants,
     dedupeConfigs,
     excludeBrands,
     excludeContains,
+    foodOnly,
     minReviews,
     priceMin,
     priceMax,
@@ -587,7 +623,9 @@ export async function search({
     query: q || null,
     category: built.category,
     sort: sortUsed,
-    page: page || 1,
+    page: startPage,
+    pages: pageCount > 1 ? pageCount : undefined,
+    foodOnly: foodOnly || undefined,
     filters:
       built.appliedFilters && Object.keys(built.appliedFilters).length
         ? built.appliedFilters
@@ -696,6 +734,63 @@ export async function details({
   }
 
   return maybeCompact("details", d, { compact, rich });
+}
+
+/**
+ * Batch product cards (up to 40). Prefer imageDataUri only for ≤24 SKUs / imageSize≤120
+ * so MCP context stays usable; for huge canvases run via Docker script instead.
+ */
+export async function productsBatch({
+  products,
+  enrichNutrition = true,
+  imageDataUri = false,
+  imageSize = 100,
+  compact = true,
+  rich,
+  concurrency = 3,
+} = {}) {
+  const list = [
+    ...new Set((products || []).map((p) => String(p || "").trim()).filter(Boolean)),
+  ].slice(0, 40);
+  if (!list.length) throw new Error("products requires 1–40 SKUs/URLs/slugs");
+
+  let uri = Boolean(imageDataUri);
+  let size = Math.min(Math.max(Number(imageSize) || 100, 50), 200);
+  const notes = [];
+  if (uri && list.length > 24) {
+    uri = false;
+    notes.push(
+      `imageDataUri disabled for batch size ${list.length} (>24) — pass ≤24 SKUs or use image URLs from rich:true`
+    );
+  }
+  if (uri && size > 120) {
+    size = 100;
+    notes.push("imageSize capped to 100 for batch payloads");
+  }
+
+  const rows = await mapPool(list, Math.min(Math.max(Number(concurrency) || 3, 1), 5), async (product) => {
+    try {
+      const d = await details({
+        product,
+        enrichNutrition,
+        imageDataUri: uri,
+        imageSize: size,
+        compact: false,
+        rich: true,
+      });
+      return d;
+    } catch (err) {
+      return { product, sku: productSku(product) || null, error: err?.message || String(err) };
+    }
+  });
+
+  const out = {
+    count: rows.length,
+    products: rows,
+    imageDataUri: uri,
+    notes: notes.length ? notes : undefined,
+  };
+  return maybeCompact("batch", out, { compact, rich });
 }
 
 export async function reviews({
@@ -831,6 +926,7 @@ export async function categoryBrowse({
   dedupeConfigs = true,
   excludeBrands,
   excludeContains,
+  foodOnly = false,
   minReviews,
   minSellerRating,
   minSellerOrders,
@@ -887,6 +983,7 @@ export async function categoryBrowse({
     dedupeConfigs,
     excludeBrands,
     excludeContains,
+    foodOnly,
     minReviews,
     priceMin,
     priceMax,

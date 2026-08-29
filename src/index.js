@@ -21,6 +21,7 @@ import {
   compareProducts,
   searchFilters,
   listCategories,
+  productsBatch,
   location,
   searchCitiesTool,
   setLocation,
@@ -141,7 +142,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.9.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.10.0" });
 
 server.registerTool(
   "ozon_search",
@@ -169,7 +170,14 @@ server.registerTool(
       sort: sortSchema.describe("popular | price | price_desc | rating | new | discount"),
       priceMin: z.number().int().nonnegative().optional().describe("Minimum price in rubles"),
       priceMax: z.number().int().nonnegative().optional().describe("Maximum price in rubles"),
-      page: z.number().int().min(1).max(20).optional().describe("Results page (default 1); Ozon returns ~8 tiles/page"),
+      page: z.number().int().min(1).max(20).optional().describe("Start results page (default 1)"),
+      pages: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .optional()
+        .describe("How many pages to merge (1–5). Use pages:3–5 for shortlists of ~24–40"),
       filters: filtersSchema,
       excludeBrands: z
         .array(z.string())
@@ -180,6 +188,12 @@ server.registerTool(
         .optional()
         .describe(
           'Same as excludeBrands — use for food noise, e.g. ["корм","для кошек","для собак","тарелка"]'
+        ),
+      foodOnly: z
+        .boolean()
+        .optional()
+        .describe(
+          "Drop common grocery-search noise (pet food, dishes, baby food, cleaners). Prefer with ozon_list_categories."
         ),
       minReviews: z
         .number()
@@ -217,11 +231,11 @@ server.registerTool(
         .describe("Collapse RAM/SSD configs of same series into configs[] (default true)"),
       compact: compactSchema,
       rich: richSchema,
-      limit: limitSchema(36, 8).describe("How many products to return after dedupe (1–36, default 8)"),
+      limit: limitSchema(40, 8).describe("How many products to return after dedupe (1–40, default 8)"),
     },
     annotations: readOnly,
   },
-  tool("ozon_search", search, 120000)
+  tool("ozon_search", search, 150000)
 );
 
 server.registerTool(
@@ -257,6 +271,34 @@ server.registerTool(
     annotations: readOnly,
   },
   tool("ozon_product_details", withProductAlias(details), 90000)
+);
+
+server.registerTool(
+  "ozon_products_batch",
+  {
+    title: "Batch Ozon product details",
+    description:
+      "Fetch 1–40 product cards in one call (nutrition + optional imageDataUri). " +
+      "imageDataUri only for ≤24 SKUs (auto-disabled above). For huge canvases prefer Docker script over stuffing MCP context. " +
+      "Reload MCP after upgrades so Cursor sees new tool schemas.",
+    inputSchema: {
+      products: z
+        .array(productId)
+        .min(1)
+        .max(40)
+        .describe("1–40 SKUs, URLs, or slugs"),
+      enrichNutrition: z.boolean().optional().describe("Default true"),
+      imageDataUri: z
+        .boolean()
+        .optional()
+        .describe("Small Data URI thumbnails (capped; ≤24 products)"),
+      imageSize: z.number().int().min(50).max(200).optional().describe("Default 100 for batch"),
+      compact: compactSchema,
+      rich: richSchema,
+    },
+    annotations: readOnly,
+  },
+  tool("ozon_products_batch", productsBatch, 300000)
 );
 
 server.registerTool(
@@ -433,6 +475,7 @@ server.registerTool(
         .array(z.string())
         .optional()
         .describe('Name/brand substrings to drop, e.g. ["корм","для кошек"]'),
+      foodOnly: z.boolean().optional().describe("Drop pet-food / dish / cleaner noise"),
       minReviews: z.number().int().nonnegative().optional(),
       minSellerRating: z.number().min(0).max(5).optional(),
       minSellerOrders: z.number().int().nonnegative().optional(),

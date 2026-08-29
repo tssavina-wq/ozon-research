@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { extractNutrition, looksFoodRelated, thumbnailUrl } from "../src/nutrition.js";
+import {
+  extractNutrition,
+  looksFoodRelated,
+  thumbnailUrl,
+  sanitizeMacroValue,
+} from "../src/nutrition.js";
 
 let failed = 0;
 function assert(cond, msg) {
@@ -14,12 +19,28 @@ const iso = extractNutrition({
   "Углеводы: грамм в 1 порции": "1",
   "Жиры: грамм в 1 порции": "0",
   "Энергетическая ценность: ккал в 1 порции": "130",
+  "Вес товара, г": "907",
   Тип: "Протеин",
 });
 assert(iso.proteinG === 30 && iso.carbsG === 1 && iso.fatG === 0 && iso.kcal === 130, "isolate macros");
 assert(iso.per === "1 порция", "per portion");
 assert(iso.missing === false, "not missing");
 assert(iso.source === "characteristics", "source chars");
+
+// Package mass must not become protein
+const massTrap = extractNutrition(
+  { "Вес товара, г": "907", Тип: "Протеин" },
+  ["Изолят сывороточного протеина Iso Sensation 93 907г Ваниль"]
+);
+assert(massTrap.proteinG == null, "no protein from package weight/name");
+assert(massTrap.missing === true, "mass trap missing macros");
+
+const huge = extractNutrition({ "Белок: грамм в 1 порции": "750" });
+assert(huge.proteinG == null, "reject 750g protein");
+assert(huge.warnings?.some((w) => /750/.test(w)), "warn on 750");
+
+assert(sanitizeMacroValue("proteinG", 907, null).value == null, "sanitize 907");
+assert(sanitizeMacroValue("proteinG", 30, "1 порция").value === 30, "sanitize 30 ok");
 
 const cottage = extractNutrition({ Тип: "Творог", "Жирность, %": "0.5", "Вес товара, г": "200" });
 assert(cottage.fatPercent === 0.5, "fat percent");
@@ -35,6 +56,7 @@ assert(fromText.per === "100 г", "text per 100g");
 assert(fromText.source === "text", "source text");
 
 assert(!looksFoodRelated("RTX 4070 laptop", { GPU: "4070" }), "not food laptop");
+assert(!looksFoodRelated("Корм для кошек", { Тип: "Корм" }), "not pet food");
 assert(
   thumbnailUrl("https://ir.ozone.ru/s3/multimedia-1-7/12912733555.jpg", 200).includes("/wc200/"),
   "thumbnail wc200"

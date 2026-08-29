@@ -319,6 +319,18 @@ export function applyCompact(kind, result) {
       return compactItemList(result);
     case "details":
       return compactDetails(result);
+    case "batch": {
+      if (!result || typeof result !== "object") return result;
+      return dropUndef({
+        compact: true,
+        count: result.count,
+        imageDataUri: result.imageDataUri,
+        notes: result.notes,
+        products: (result.products || []).map((p) =>
+          p?.error ? p : compactDetails(p)
+        ),
+      });
+    }
     case "compare":
       return compactCompare(result);
     case "filters":
