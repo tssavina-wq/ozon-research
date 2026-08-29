@@ -141,7 +141,7 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.6.0" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.6.1" });
 
 server.registerTool(
   "ozon_search",
@@ -150,7 +150,7 @@ server.registerTool(
     description:
       "Entry point for product discovery on ozon.ru. Default compact=true: sku, name, price, rating, reviews, brand, url " +
       "(+ reviewTrust / variantCount|configCount when >1). Pass compact:false or rich:true for full nested variants/configs/images. " +
-      "Laptop/ultrabook queries auto-pin category noutbuki-15692 when category omitted. " +
+      "Do NOT guess category slugs — copy from ozon_search_filters or a real ozon.ru URL; omit category for plain text search. " +
       "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. Prefer limit 5–8 for shortlists. " +
       "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {

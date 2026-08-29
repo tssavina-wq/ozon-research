@@ -1,6 +1,6 @@
 {
   "name": "ozon-customer-mcp",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "MCP server for Ozon customer marketplace: search, product data, sellers, catalogs and delivery city via Camoufox",
   "type": "module",
   "bin": {
@@ -15,9 +15,17 @@
     "smoke:location": "node scripts/smoke-location.js",
     "smoke:filters": "node scripts/smoke-compare-filters.js"
   },
-  "keywords": ["mcp", "ozon", "marketplace", "camoufox", "customer"],
+  "keywords": [
+    "mcp",
+    "ozon",
+    "marketplace",
+    "camoufox",
+    "customer"
+  ],
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
     "zod": "^3.25.0"

@@ -11,7 +11,6 @@ import {
   parseOffers,
   _internal,
 } from "../src/parse.js";
-import { inferCategoryFromQuery } from "../src/ozon.js";
 
 const { parseProductScore } = _internal;
 let failed = 0;
@@ -164,14 +163,6 @@ const specsPage = {
 const specs = parseSpecs(specsPage);
 ok(specs.fieldCount >= 40, `parseSpecs picks rich widget (${specs.fieldCount})`);
 ok(!specs.sparse, "rich specs not sparse");
-
-ok(inferCategoryFromQuery("ультрабук dual screen") === "noutbuki-15692", "ultrabook → laptops");
-ok(inferCategoryFromQuery("игровой ноутбук RTX") === "igrovye-noutbuki-15821", "gaming laptop category");
-ok(inferCategoryFromQuery("iphone 15") == null, "phone query no laptop pin");
-ok(
-  inferCategoryFromQuery("СЖО Arctic Liquid Freezer") === "sistemy-ohlazhdeniya-dlya-igrovyh-pk-15732",
-  "СЖО → water cooling category"
-);
 
 const delivery = parseDelivery({
   state: {

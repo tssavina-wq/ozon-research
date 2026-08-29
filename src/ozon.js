@@ -42,20 +42,6 @@ function maybeCompact(kind, result, args) {
   return applyCompact(kind, result);
 }
 
-/** Soft intent → category pin when agent didn't pass category. */
-const QUERY_CATEGORY_HINTS = [
-  { re: /игров\S*\s+ноутбук|gaming\s+laptop/i, category: "igrovye-noutbuki-15821" },
-  {
-    re: /ультрабук|ultrabook|ноутбук|laptop|notebook|zenbook|macbook|thinkpad|yoga\s*book|thinkbook/i,
-    category: "noutbuki-15692",
-  },
-  { re: /беспроводн\S*\s+мыш|wireless\s+mouse/i, category: "besprovodnye-myshi-31940" },
-  {
-    re: /\bсжо\b|aio\s*cooler|liquid\s*freezer|водян\S*\s+охлажд|система\s+жидкостн\S*\s+охлажд/i,
-    category: "sistemy-ohlazhdeniya-dlya-igrovyh-pk-15732",
-  },
-];
-
 const WIDGET_JSON_V2 = "https://www.ozon.ru/api/composer-api.bx/widget/json/v2";
 
 /** Resolve async onPageLoad widgets (webDelivery lives here, not in initial page JSON). */
@@ -73,15 +59,6 @@ export async function fetchAsyncWidget(page, component) {
     method: "POST",
     body: { asyncData: node.asyncData, url },
   });
-}
-
-export function inferCategoryFromQuery(query) {
-  const q = String(query || "").trim();
-  if (!q) return null;
-  for (const h of QUERY_CATEGORY_HINTS) {
-    if (h.re.test(q)) return h.category;
-  }
-  return null;
 }
 
 const SORT_MAP = {
@@ -411,12 +388,10 @@ export async function search({
   }
   const q = query ? String(query).trim() : undefined;
   const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
-  const inferredCategory = !category && q ? inferCategoryFromQuery(q) : null;
-  const categoryUsed = category || inferredCategory || undefined;
 
   const built = await buildCatalogUrl({
     query: q,
-    category: categoryUsed,
+    category,
     sort,
     priceMin,
     priceMax,
@@ -463,7 +438,6 @@ export async function search({
   const out = {
     query: q || null,
     category: built.category,
-    categoryInferred: Boolean(inferredCategory && !category),
     sort: sortUsed,
     page: page || 1,
     filters:
