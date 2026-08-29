@@ -22,6 +22,7 @@ import {
   findLayoutWidget,
   parseDelivery,
 } from "./parse.js";
+import { wantCompact, applyCompact } from "./compact.js";
 import {
   filtersNeedResolve,
   resolveFilterTitles,
@@ -32,6 +33,14 @@ import {
 import { _internal } from "./parse.js";
 
 const { skuFromUrl } = _internal;
+
+function maybeCompact(kind, result, args) {
+  if (!wantCompact(args)) {
+    if (result && typeof result === "object") return { ...result, compact: false };
+    return result;
+  }
+  return applyCompact(kind, result);
+}
 
 /** Soft intent → category pin when agent didn't pass category. */
 const QUERY_CATEGORY_HINTS = [
@@ -389,11 +398,13 @@ export async function search({
   priceMax,
   page = 1,
   filters,
-  limit = 12,
+  limit = 8,
   dedupeVariants = true,
   dedupeConfigs = true,
   excludeBrands,
   minReviews,
+  compact,
+  rich,
 } = {}) {
   if ((!query || !String(query).trim()) && !category && !(filters && filters.category)) {
     throw new Error("query or category is required");
@@ -484,10 +495,10 @@ export async function search({
         "No products found. Try ozon_search_filters for filter keys, loosen filters, excludeBrands, or page=2.";
     }
   }
-  return out;
+  return maybeCompact("search", out, { compact, rich });
 }
 
-export async function details({ product }) {
+export async function details({ product, compact, rich } = {}) {
   const path = productPath(product);
   const [basePage, page2] = await Promise.all([
     fetchJson(path),
@@ -508,7 +519,7 @@ export async function details({ product }) {
       error: err?.message || String(err),
     };
   }
-  return d;
+  return maybeCompact("details", d, { compact, rich });
 }
 
 export async function reviews({
@@ -518,18 +529,21 @@ export async function reviews({
   sort = "helpful",
   hasPhotos = false,
   variantOnly = true,
+  compact,
+  rich,
 } = {}) {
   const id = product || sku;
   const path = productPath(id);
   // reviewsVariantMode=1 → Ozon UI «Этот вариант»; =2 → all sibling variants on the card.
   const mode = variantOnly ? 1 : 2;
   const page = await fetchJson(`${path}reviews/?reviewsVariantMode=${mode}`);
-  return parseReviews(page, limit, {
+  const parsed = parseReviews(page, limit, {
     sort,
     hasPhotos,
     productSku: productSku(id),
     variantOnly: Boolean(variantOnly),
   });
+  return maybeCompact("reviews", parsed, { compact, rich });
 }
 
 export async function questions({ product, limit = 10 }) {
@@ -538,7 +552,14 @@ export async function questions({ product, limit = 10 }) {
   return parseQuestions(page, limit);
 }
 
-export async function offers({ product, sort = "price", limit = 12, includeCurrent = true } = {}) {
+export async function offers({
+  product,
+  sort = "price",
+  limit = 12,
+  includeCurrent = true,
+  compact,
+  rich,
+} = {}) {
   const sku = productSku(product);
   if (!sku) throw new Error("could not resolve product sku");
   const offerSort = OFFERS_SORT_MAP[sort] || "price";
@@ -547,7 +568,8 @@ export async function offers({ product, sort = "price", limit = 12, includeCurre
 
   if (includeCurrent) {
     try {
-      const current = await details({ product: sku });
+      // Always load full details for current row; outer compact applied below.
+      const current = await details({ product: sku, compact: false });
       const currentRow = {
         sellerId: null,
         sku: current.sku || sku,
@@ -566,7 +588,6 @@ export async function offers({ product, sort = "price", limit = 12, includeCurre
         productUrl: current.url || null,
         image: current.images?.[0] || null,
       };
-      // Dedupe if otherOffers already lists same seller+price
       const rest = parsed.sellers.filter(
         (s) =>
           !(
@@ -584,7 +605,10 @@ export async function offers({ product, sort = "price", limit = 12, includeCurre
     }
   }
 
-  return { product: sku, includeCurrent: Boolean(includeCurrent), ...parsed };
+  return maybeCompact("offers", { product: sku, includeCurrent: Boolean(includeCurrent), ...parsed }, {
+    compact,
+    rich,
+  });
 }
 
 export async function variants({ product }) {
@@ -605,10 +629,18 @@ export async function sellerInfo({ seller }) {
   return parseSellerInfo(page);
 }
 
-export async function sellerCatalog({ seller, sort = "popular", priceMin, priceMax, limit = 12 }) {
+export async function sellerCatalog({
+  seller,
+  sort = "popular",
+  priceMin,
+  priceMax,
+  limit = 12,
+  compact,
+  rich,
+}) {
   const path = appendCatalogParams(catalogPath(seller, "seller"), { sort, priceMin, priceMax });
   const page = await fetchJson(path);
-  return parseSellerCatalog(page, limit);
+  return maybeCompact("sellerCatalog", parseSellerCatalog(page, limit), { compact, rich });
 }
 
 export async function categoryBrowse({
@@ -623,6 +655,8 @@ export async function categoryBrowse({
   dedupeConfigs = true,
   excludeBrands,
   minReviews,
+  compact,
+  rich,
 } = {}) {
   const fetchLimit = dedupeVariants || dedupeConfigs ? Math.min(36, Math.max(limit * 3, limit)) : limit;
   const { url, category: resolvedCategory, appliedFilters } = await buildCatalogUrl({
@@ -667,7 +701,7 @@ export async function categoryBrowse({
     minReviews,
   });
   const meta = parseCategoryBrowse(pageData, fetchLimit);
-  return {
+  const out = {
     ...meta,
     sort: sortUsed,
     page: page || 1,
@@ -681,9 +715,19 @@ export async function categoryBrowse({
     dedupeConfigs: finalized.dedupeConfigs,
     sponsoredOnly: finalized.sponsoredOnly || undefined,
   };
+  return maybeCompact("browse", out, { compact, rich });
 }
 
-export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax, filters, limit = 12 }) {
+export async function brandCatalog({
+  brand,
+  sort = "popular",
+  priceMin,
+  priceMax,
+  filters,
+  limit = 12,
+  compact,
+  rich,
+}) {
   const brandPath = await resolveBrandPath(brand);
   let applied = filters && typeof filters === "object" ? { ...filters } : {};
   if (filtersNeedResolve(applied)) {
@@ -696,17 +740,21 @@ export async function brandCatalog({ brand, sort = "popular", priceMin, priceMax
   const page = await fetchJson(url);
   const result = parseBrandCatalog(page, limit);
   if (Object.keys(applied).length) result.filters = applied;
-  return result;
+  return maybeCompact("brand", result, { compact, rich });
 }
 
-export async function relatedProducts({ product, limit = 12 }) {
+export async function relatedProducts({ product, limit = 12, compact, rich }) {
   const path = productPath(product);
   const page = await fetchJson(`${path}?layout_container=pdpPage2column&layout_page_index=2`);
-  return { product: productSku(product), ...parseRelatedProducts(page, limit) };
+  return maybeCompact(
+    "related",
+    { product: productSku(product), ...parseRelatedProducts(page, limit) },
+    { compact, rich }
+  );
 }
 
 /** Compare 2–8 products: details + fullest specs widget in one matrix. */
-export async function compareProducts({ products }) {
+export async function compareProducts({ products, compact, rich }) {
   const list = [
     ...new Set((products || []).map((p) => String(p || "").trim()).filter(Boolean)),
   ];
@@ -791,7 +839,7 @@ export async function compareProducts({ products }) {
     missingKeysByProduct[r.sku] = allKeys.filter((k) => r.characteristics?.[k] == null);
   }
 
-  return {
+  const out = {
     count: rows.length,
     products: rows,
     matrix,
@@ -800,9 +848,10 @@ export async function compareProducts({ products }) {
       ? "Some listings have sparse specs — check extracted{} (title/characteristics only; GPU never from description) and prefer another SKU of the same model."
       : null,
   };
+  return maybeCompact("compare", out, { compact, rich });
 }
 
-export async function searchFilters({ query, category } = {}) {
+export async function searchFilters({ query, category, compact, rich } = {}) {
   if ((!query || !String(query).trim()) && !category) {
     throw new Error("query or category is required");
   }
@@ -814,7 +863,7 @@ export async function searchFilters({ query, category } = {}) {
   }
   const page = await fetchJson(url);
   if (category) assertCategorySlug(category, page);
-  return parseSearchFilters(page, query || category);
+  return maybeCompact("filters", parseSearchFilters(page, query || category), { compact, rich });
 }
 
 export async function location() {

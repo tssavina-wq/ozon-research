@@ -29,8 +29,21 @@ import { shutdown, warmup } from "./browser.js";
 const log = (...a) => console.error("[ozon-customer-mcp]", ...a);
 const TOOL_TIMEOUT_MS = 55000;
 const MAX_TEXT = 60000;
+const MAX_TEXT_COMPACT = 24000;
 const EXIT_IDLE_MS = Number(process.env.OZON_EXIT_IDLE_MS || 30 * 60 * 1000);
 const DO_WARMUP = process.env.OZON_WARMUP !== "0";
+
+/** Default compact=true. Pass compact:false or rich:true for full payloads. */
+const compactSchema = z
+  .boolean()
+  .optional()
+  .describe(
+    "Default true: slim fields (saves context). false or rich:true returns full nested variants/images/filters."
+  );
+const richSchema = z
+  .boolean()
+  .optional()
+  .describe("Alias for compact:false — return full payload");
 
 const productId = z
   .string()
@@ -109,8 +122,10 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
     resetExitIdle();
     try {
       const result = await withTimeout(fn(args), timeoutMs, label);
-      let text = JSON.stringify(result, null, 2);
-      if (text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT) + "\n…(truncated)";
+      const isCompact = result && typeof result === "object" && result.compact === true;
+      let text = isCompact ? JSON.stringify(result) : JSON.stringify(result, null, 2);
+      const max = isCompact ? MAX_TEXT_COMPACT : MAX_TEXT;
+      if (text.length > max) text = text.slice(0, max) + "\n…(truncated)";
       return { content: [{ type: "text", text }] };
     } catch (err) {
       log(`${label} error:`, err?.message);
@@ -126,21 +141,17 @@ function tool(label, fn, timeoutMs = TOOL_TIMEOUT_MS) {
   };
 }
 
-const server = new McpServer({ name: "ozon-customer-mcp", version: "1.5.3" });
+const server = new McpServer({ name: "ozon-customer-mcp", version: "1.6.0" });
 
 server.registerTool(
   "ozon_search",
   {
     title: "Search Ozon products",
     description:
-      "Entry point for product discovery on ozon.ru. Use when the user asks to find, look up, or compare products " +
-      "by name or keywords. Returns sku, name, price, rating, reviews, brand, url, plus reviewTrust, " +
-      "baseModelKey, configs[] / variants[]. Same review count on color/RAM variants of one card is normal " +
-      "(variantReviewPool); reviewsSharedAcrossModels only flags collisions across different models. " +
-      "Laptop/ultrabook queries auto-pin category noutbuki-15692 when category omitted (categoryInferred). " +
-      "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. " +
-      "Color+RAM/SSD configs are deduped by default. If sort=popular is empty/ads-only → auto rating " +
-      "(see note — not true popularity). page=2+ for next shelf. " +
+      "Entry point for product discovery on ozon.ru. Default compact=true: sku, name, price, rating, reviews, brand, url " +
+      "(+ reviewTrust / variantCount|configCount when >1). Pass compact:false or rich:true for full nested variants/configs/images. " +
+      "Laptop/ultrabook queries auto-pin category noutbuki-15692 when category omitted. " +
+      "Use priceMin/priceMax, filters{} (from ozon_search_filters), excludeBrands, minReviews. Prefer limit 5–8 for shortlists. " +
       "Next: ozon_product_details / ozon_compare_products / ozon_product_offers.",
     inputSchema: {
       query: z
@@ -176,7 +187,9 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Collapse RAM/SSD configs of same series into configs[] (default true)"),
-      limit: limitSchema(36, 12).describe("How many products to return after dedupe (1–36)"),
+      compact: compactSchema,
+      rich: richSchema,
+      limit: limitSchema(36, 8).describe("How many products to return after dedupe (1–36, default 8)"),
     },
     annotations: readOnly,
   },
@@ -188,14 +201,14 @@ server.registerTool(
   {
     title: "Get Ozon product details",
     description:
-      "Full product card for one item. Use when you already have sku or product URL from ozon_search. " +
-      "Returns: name, price/cardPrice/oldPrice, availability, seller name+rating, images, " +
-      "short characteristics (5–10 fields), text description, location {city, region, pickupAddress}, " +
-      "and delivery { summary, best, options[] } for the CURRENT listing (courier/PVZ dates for session city). " +
-      "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews. For other sellers use ozon_product_offers.",
+      "Product card. Default compact=true: price, seller, location, delivery summary, short characteristics " +
+      "(no image gallery / full description). compact:false or rich:true for images + full description. " +
+      "For ALL specs use ozon_product_specs. For reviews use ozon_product_reviews.",
     inputSchema: {
       product: productId.optional().describe("SKU, URL, or slug"),
       sku: z.string().min(1).optional().describe("Alias for product (same meaning)"),
+      compact: compactSchema,
+      rich: richSchema,
     },
     annotations: readOnly,
   },
@@ -228,6 +241,8 @@ server.registerTool(
         .optional()
         .describe("Client-side sort (Ozon composer ignores most URL sort params)"),
       hasPhotos: z.boolean().optional().describe("Only reviews with photos"),
+      compact: compactSchema,
+      rich: richSchema,
       limit: limitSchema(30, 10).describe("Number of reviews to return"),
     },
     annotations: readOnly,
@@ -271,6 +286,8 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Prepend current product-card seller with delivery (default true)"),
+      compact: compactSchema,
+      rich: richSchema,
       limit: limitSchema(36, 12).describe("Max offers to return"),
     },
     annotations: readOnly,
@@ -340,7 +357,9 @@ server.registerTool(
       sort: sortSchema,
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
-      limit: limitSchema(36, 12),
+      compact: compactSchema,
+      rich: richSchema,
+      limit: limitSchema(36, 8),
     },
     annotations: readOnly,
   },
@@ -368,7 +387,9 @@ server.registerTool(
       page: z.number().int().min(1).max(20).optional(),
       dedupeVariants: z.boolean().optional().describe("Collapse color variants (default true)"),
       dedupeConfigs: z.boolean().optional().describe("Collapse RAM/SSD configs (default true)"),
-      limit: limitSchema(36, 12),
+      compact: compactSchema,
+      rich: richSchema,
+      limit: limitSchema(36, 8),
     },
     annotations: readOnly,
   },
@@ -389,7 +410,9 @@ server.registerTool(
       priceMin: z.number().int().nonnegative().optional(),
       priceMax: z.number().int().nonnegative().optional(),
       filters: filtersSchema,
-      limit: limitSchema(36, 12),
+      compact: compactSchema,
+      rich: richSchema,
+      limit: limitSchema(36, 8),
     },
     annotations: readOnly,
   },
@@ -407,7 +430,9 @@ server.registerTool(
     inputSchema: {
       product: productId.optional(),
       sku: z.string().min(1).optional(),
-      limit: limitSchema(36, 12),
+      compact: compactSchema,
+      rich: richSchema,
+      limit: limitSchema(36, 8),
     },
     annotations: readOnly,
   },
@@ -419,16 +444,17 @@ server.registerTool(
   {
     title: "Compare Ozon products side-by-side",
     description:
-      "Fetch details+fullest specs widget for 2–8 products and build a characteristic matrix " +
-      "(same parser as ozon_product_specs; retries if sparse). " +
-      "extracted{} GPU/RAM hints come from characteristics or title only — never from description. " +
-      "missingKeysByProduct[sku] = fields present in the matrix but missing on that SKU.",
+      "Compare 2–8 products. Default compact=true: matrix + slim product rows (no per-SKU characteristics dump / missingKeys). " +
+      "compact:false keeps full characteristics + missingKeysByProduct. " +
+      "extracted{} from characteristics/title only.",
     inputSchema: {
       products: z
         .array(productId)
         .min(2)
         .max(8)
         .describe("2–8 product SKUs, URLs, or slugs to compare"),
+      compact: compactSchema,
+      rich: richSchema,
     },
     annotations: readOnly,
   },
@@ -440,9 +466,8 @@ server.registerTool(
   {
     title: "Get Ozon search filters",
     description:
-      "Available filters and sort options BEFORE / alongside searching. Use to discover brand keys, " +
-      "delivery options, attribute facets, then pass those keys into ozon_search filters{}. " +
-      "Returns: filters[] (key, type, options with key+title), activeFilters, sortOptions. " +
+      "Available filters and sort options BEFORE / alongside searching. Default compact=true truncates long facet option lists " +
+      "(keeps brand/category/GPU/CPU fuller). Pass compact:false for complete options. " +
       "Does not return products.",
     inputSchema: {
       query: z.string().min(1).optional().describe('Search text, e.g. "iphone 15" (optional if category set)'),
@@ -451,6 +476,8 @@ server.registerTool(
         .min(1)
         .optional()
         .describe("Category slug to list facets for, e.g. besprovodnye-myshi-31940"),
+      compact: compactSchema,
+      rich: richSchema,
     },
     annotations: readOnly,
   },
