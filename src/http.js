@@ -1,4 +1,7 @@
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+function sample(){const read=p=>{try{return readFileSync(p,'utf8').trim()}catch{return null}};return {memoryBytes:read('/sys/fs/cgroup/memory.current')??read('/sys/fs/cgroup/memory/memory.usage_in_bytes'),memoryLimit:read('/sys/fs/cgroup/memory.max')??read('/sys/fs/cgroup/memory/memory.limit_in_bytes'),memoryEvents:read('/sys/fs/cgroup/memory.events'),cpu:read('/sys/fs/cgroup/cpu.stat'),nodeRss:process.memoryUsage().rss};}
+
 import { timingSafeEqual } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -33,6 +36,9 @@ http.createServer(async(req,res)=>{
   if(!authorized(req)) return send(res,401,{error:'Unauthorized'});
   if(busy) return send(res,429,{error:'Another request is running'});
   busy=true;
+  const started=Date.now();
+  const monitor=setInterval(()=>console.log('RESOURCE '+JSON.stringify(sample())),10000);
+  console.log('REQUEST START '+JSON.stringify(sample()));
   try{
     if(req.method==='GET' && req.url==='/tools'){
       return send(res,200,await (await connect()).listTools());
@@ -42,8 +48,8 @@ http.createServer(async(req,res)=>{
     for await(const chunk of req){body+=chunk;if(Buffer.byteLength(body)>65536)return send(res,413,{error:'Request too large'});}
     const {name,arguments:args={}}=JSON.parse(body);
     if(typeof name!=='string'||!/^ozon_[a-z_]+$/.test(name)||!args||typeof args!=='object'||Array.isArray(args))return send(res,400,{error:'Invalid tool request'});
-    const result=await (await connect()).callTool({name,arguments:args},undefined,{timeout:100000});
+    const result=await (await connect()).callTool({name,arguments:args},undefined,{timeout:175000});
     return send(res,result.isError?502:200,result);
   }catch(e){return send(res,502,{error:String(e.message||e)});}
-  finally{busy=false;}
+  finally{clearInterval(monitor);console.log('REQUEST END '+(Date.now()-started)+'ms '+JSON.stringify(sample()));busy=false;}
 }).listen(Number(process.env.PORT||10000),'0.0.0.0',()=>console.log('HTTP server ready'));
